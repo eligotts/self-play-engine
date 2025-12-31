@@ -120,6 +120,9 @@ class TrainingRecord:
     completion_token_ids: List[int]
     logprobs: List[float]
 
+    # Action mask: 0s for prompt tokens, 1s for completion tokens
+    action_mask: List[int]
+
     # Reward/advantage for this step
     reward: float  # Raw reward from rubric
     advantage: float = 0.0  # Credit-assigned weight (for training loss)
@@ -130,7 +133,3 @@ class TrainingRecord:
     @property
     def input_ids(self) -> List[int]:
         return self.prompt_token_ids + self.completion_token_ids
-
-    @property
-    def action_mask(self) -> List[int]:
-        return [0] * len(self.prompt_token_ids) + [1] * len(self.completion_token_ids)

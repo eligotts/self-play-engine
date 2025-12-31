@@ -59,6 +59,10 @@ from .core import (
     EpisodeRequest,
     TrainingBatch,
     Arena,
+    # Clients
+    OpenAIClient,
+    # Logging
+    VerboseLogger,
 )
 
 __version__ = "0.1.0"
@@ -98,4 +102,8 @@ __all__ = [
     "EpisodeRequest",
     "TrainingBatch",
     "Arena",
+    # Clients
+    "OpenAIClient",
+    # Logging
+    "VerboseLogger",
 ]

@@ -33,6 +33,7 @@ from ..core import (
     Artifact,
     Step,
     EpisodeRequest,
+    GRPOCredit,
 )
 
 
@@ -60,6 +61,12 @@ def make_solver_rubric(solver_role: str) -> Rubric:
         predicted = answer.strip().lower()
 
         reward = 1.0 if predicted == ground_truth else 0.0
+
+        if reward == 0.0:
+            print(f"    [solver_rubric] MISMATCH: predicted='{predicted[:40]}' vs ground_truth='{ground_truth}' → reward=0.0")
+        else:
+            print(f"    [solver_rubric] MATCH: predicted='{predicted[:40]}' vs ground_truth='{ground_truth}' → reward=1.0")
+
         return {solver_role: reward}
 
     return Rubric(funcs=[exact_match])
@@ -76,6 +83,7 @@ def make_proposer_rubric(proposer_role: str, target_pass_rate: float = 0.5) -> R
 
         # Invalid question = negative reward
         if not proposed or not proposed.get("question") or not proposed.get("ground_truth"):
+            print(f"    [proposer_rubric] invalid question → reward=-1.0")
             return {proposer_role: -1.0}
 
         # Get pass rate from extras (computed in get_extras)
@@ -84,8 +92,11 @@ def make_proposer_rubric(proposer_role: str, target_pass_rate: float = 0.5) -> R
         # Reward peaks at target pass rate
         distance = abs(pass_rate - target_pass_rate)
         reward = 1.0 - (distance * 2)  # Max 1.0 at target, 0.0 at extremes
+        final_reward = max(-0.5, reward)
 
-        return {proposer_role: max(-0.5, reward)}
+        print(f"    [proposer_rubric] pass_rate={pass_rate}, target={target_pass_rate}, distance={distance}, raw_reward={reward}, final_reward={final_reward}")
+
+        return {proposer_role: final_reward}
 
     return Rubric(funcs=[pass_rate_reward])
 
@@ -125,7 +136,7 @@ class SolveEpisode(SingleTurnEpisode):
 {question}
 
 Think step by step, then provide your final answer.
-End your response with: "The answer is: <your answer>\""""
+You MUST end your response with: "The answer is: <your answer>\""""
 
 
 # ---------------------------------------------------------------------------
@@ -234,12 +245,19 @@ class ProposerEpisode(Episode):
                 few_shot_text += f"Example {i}:\n{json.dumps(ex, indent=2)}\n\n"
 
         user_content = f"""{few_shot_text}Generate a new math question. The question should:
-1. Be challenging but solvable
-2. Have a clear, unambiguous answer
-3. Be different from the examples
+        1. Be challenging but solvable
+        2. Have a clear, unambiguous answer
+        3. Be different from the examples
 
-Respond with a JSON object containing:
-{{"question": "<the question text>", "ground_truth": "<the correct answer>"}}"""
+        Respond with a JSON object containing:
+        {{"question": "<the question text>", "ground_truth": "<the correct answer>"}}
+
+        CRITICAL INSTRUCTIONS:
+        - Do NOT write any text before or after the JSON
+        - Do NOT use markdown code blocks (backticks)
+        - Output ONLY a single JSON object
+        - Start your response with {{ and end with }}
+        - Respond with ONLY JSON:"""
 
         messages: Messages = []
         if role.system_prompt:
@@ -264,11 +282,29 @@ Respond with a JSON object containing:
             child.rewards.get("Solver", 0.0)
             for child in state.child_results
         ]
+        pass_rate = sum(1 for r in child_rewards if r > 0.5) / len(child_rewards) if child_rewards else 0.0
+
+        # Debug logging for proposer reward diagnosis
+        print(f"    [get_extras] child_results count: {len(state.child_results)}")
+        print(f"    [get_extras] child_rewards: {child_rewards}")
+        print(f"    [get_extras] pass_rate: {pass_rate}")
+
+        # Log individual solver answers for debugging
+        for i, child in enumerate(state.child_results):
+            solver_answer = child.rollout.steps[-1].completion_text if child.rollout.steps else "(no steps)"
+            # Extract just the answer portion
+            if "The answer is:" in solver_answer:
+                extracted = solver_answer.split("The answer is:")[-1].strip().rstrip(".")[:50]
+            else:
+                extracted = solver_answer[-50:] if solver_answer else "(empty)"
+            ground_truth = child.rollout.artifact.get("ground_truth", "?")
+            print(f"    [get_extras] solver[{i}]: extracted='{extracted}' vs ground_truth='{ground_truth}' → reward={child.rewards.get('Solver', 0.0)}")
+
         return {
             "proposed_question": state.data.get("proposed_question"),
             "proposed_raw": state.last_completion_text,
             "solver_rewards": child_rewards,
-            "pass_rate": sum(1 for r in child_rewards if r > 0.5) / len(child_rewards) if child_rewards else 0.0,
+            "pass_rate": pass_rate,
         }
 
 
@@ -279,8 +315,8 @@ Respond with a JSON object containing:
 class ProposerSolverArena(Arena):
     """Arena that schedules proposer episodes (solvers are nested inside)."""
 
-    def __init__(self, client: InferenceClient, batch_size: int = 4):
-        super().__init__(client)
+    def __init__(self, client: InferenceClient, batch_size: int = 4, verbose: bool = False):
+        super().__init__(client, credit_assigner=GRPOCredit(), verbose=verbose)
         self.batch_size = batch_size
 
     def get_batch(self) -> List[EpisodeRequest]:
@@ -313,32 +349,35 @@ def create_proposer_solver_arena(
     initial_questions: Optional[List[Dict[str, str]]] = None,
     n_solver_rollouts: int = 4,
     batch_size: int = 4,
+    verbose: bool = False,
 ) -> ProposerSolverArena:
     """Create a complete proposer/solver arena."""
-    arena = ProposerSolverArena(client, batch_size=batch_size)
+    arena = ProposerSolverArena(client, batch_size=batch_size, verbose=verbose)
 
     arena.add_role(Role(
         id="Proposer",
         system_prompt="You are a creative math problem creator. "
-                      "Generate interesting, well-formed problems with clear answers.",
+                      "Generate interesting, well-formed problems with clear answers."
+                      "Ensure that in your question you explicitly state the form the answer should be provided in.",
         temperature=0.9,
-        max_tokens=300,
+        max_tokens=1024,
     ))
 
     arena.add_role(Role(
         id="Solver",
         system_prompt="You are a skilled math problem solver. "
-                      "Think step by step and provide clear, correct answers.",
+                      "Think step by step and provide clear, correct answers."
+                      "Ensure that your answer is provided in the form specified in the question.",
         temperature=0.7,
-        max_tokens=500,
+        max_tokens=1024,
     ))
 
     question_store = arena.add_store("questions")
     if initial_questions is None:
         initial_questions = [
-            {"question": "What is 15 + 27?", "ground_truth": "42"},
-            {"question": "If x + 5 = 12, what is x?", "ground_truth": "7"},
-            {"question": "What is 8 * 5?", "ground_truth": "40"},
+            {"question": "What is 15 + 27? Answer in the form of a number.", "ground_truth": "42"},
+            {"question": "If x + 5 = 12, what is x? Answer in the form of just the number, no 'x = '.", "ground_truth": "7"},
+            {"question": "What is 8 * 5? Answer in the form of a number.", "ground_truth": "40"},
         ]
     for i, q in enumerate(initial_questions):
         question_store.add(Artifact(id=f"seed_{i}", data=q))

@@ -48,6 +48,10 @@ from .arena import (
     Arena,
 )
 
+from .clients import OpenAIClient
+
+from .logging import VerboseLogger
+
 __all__ = [
     # Types
     "Message",
@@ -83,4 +87,8 @@ __all__ = [
     "EpisodeRequest",
     "TrainingBatch",
     "Arena",
+    # Clients
+    "OpenAIClient",
+    # Logging
+    "VerboseLogger",
 ]

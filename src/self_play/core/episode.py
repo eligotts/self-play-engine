@@ -233,7 +233,12 @@ async def run_chat_loop(
         prompt: Messages = []
         if system_prompt:
             prompt.append({"role": "system", "content": system_prompt})
-        prompt.append({"role": "user", "content": history})
+        user_string = ""
+        if state.turn > 0:
+            user_string = "Conversation history: \n\n" + history + "\n\nEnd of conversation history."
+        else:
+            user_string = history
+        prompt.append({"role": "user", "content": user_string})
 
         # Call model
         response = await episode.call_model(state.current_actor, prompt, arena)
@@ -372,7 +377,7 @@ class AlternatingRolesEpisode(MultiTurnEpisode):
         ...
 
     def get_initial_actor(self, artifact: Any) -> str:
-        return self.roles[0]
+        return self.roles[1]
 
     def get_next_actor(self, state: EpisodeState, artifact: Any) -> str:
-        return self.roles[state.turn % 2]
+        return self.roles[(state.turn + 1) % 2]

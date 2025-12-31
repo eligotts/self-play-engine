@@ -14,6 +14,7 @@ Debate Structure:
 from __future__ import annotations
 
 import json
+import random
 from typing import Any, Dict, List, Tuple
 
 from ..core import (
@@ -26,6 +27,8 @@ from ..core import (
     InferenceClient,
     Artifact,
     EpisodeRequest,
+    CreditAssigner,
+    GRPOCredit,
 )
 
 
@@ -39,14 +42,29 @@ def make_debate_rubric(aff_role: str, neg_role: str) -> Rubric:
 
     Returns zero-sum rewards: winner gets +score, loser gets -score.
     """
-    judge_prompt = f"""You are an impartial judge evaluating a debate between {aff_role} and {neg_role}.
+    judge_prompt = f"""You are a JUDGE, not a debater. Your sole task is to evaluate the debate transcript below and output a JSON verdict.
 
-Evaluate based on:
-1. Strength of arguments
-2. Quality of reasoning
-3. Persuasiveness
+CRITICAL INSTRUCTIONS:
+- You are NOT a participant in this debate
+- Do NOT write any arguments or continue the debate
+- Do NOT write any text before or after the JSON
+- Output ONLY a single JSON object
 
-Respond with JSON: {{"winner": "{aff_role}" or "{neg_role}", "score": <0.0-1.0>, "reasoning": "<brief explanation>"}}"""
+Evaluation criteria: quality of reasoning and how well each role directly responds to the details of the other role's argument. If they
+do not directly respond to the other role's argument, they lose.
+
+Required JSON format (output ONLY this, nothing else):
+{{"winner": "{aff_role}", "score": 0.7, "reasoning": "One sentence explaining why"}}
+
+Rules:
+- "winner" must be exactly "{aff_role}" or "{neg_role}"
+- "score" is winner's margin of victory from 0.5 (very close) to 1.0 (decisive)
+- Start your response with {{ and end with }}
+
+Example valid response:
+{{"winner": "{neg_role}", "score": 0.65, "reasoning": "{neg_role} provided stronger evidence and effectively rebutted {aff_role}'s main points."}}
+
+Now evaluate the following debate transcript and respond with ONLY JSON:"""
 
     async def llm_judge(rollout: Rollout, arena: Arena) -> Dict[str, float]:
         if not rollout.steps:
@@ -77,9 +95,25 @@ Respond with JSON: {{"winner": "{aff_role}" or "{neg_role}", "score": <0.0-1.0>,
             max_tokens=500,
         )
 
-        # Parse judgment
+        # Parse judgment - handle markdown code fences
+        text = response.text.strip()
+
+        # Strip markdown code fences if present
+        if text.startswith("```"):
+            lines = text.split("\n")
+            # Remove first line (```json) and last line (```)
+            lines = [l for l in lines if not l.strip().startswith("```")]
+            text = "\n".join(lines).strip()
+
+        # Try to extract JSON from the response
         try:
-            data = json.loads(response.text)
+            # Find JSON object in text
+            if "{" in text:
+                start = text.index("{")
+                end = text.rindex("}") + 1
+                text = text[start:end]
+
+            data = json.loads(text)
             winner = data.get("winner", "")
             score = float(data.get("score", 0.5))
 
@@ -87,8 +121,14 @@ Respond with JSON: {{"winner": "{aff_role}" or "{neg_role}", "score": <0.0-1.0>,
                 return {aff_role: score, neg_role: -score}
             elif winner == neg_role:
                 return {aff_role: -score, neg_role: score}
-        except (json.JSONDecodeError, ValueError):
-            pass
+            else:
+                if arena.verbose:
+                    print(f"      [judge] invalid winner '{winner}', expected {aff_role} or {neg_role}")
+        except (json.JSONDecodeError, ValueError) as e:
+            if arena.verbose:
+                preview = response.text[:100].replace('\n', ' ')
+                print(f"      [judge] JSON parse failed: {e}")
+                print(f"      [judge] response was: {preview}...")
 
         # Default: tie
         return {aff_role: 0.0, neg_role: 0.0}
@@ -139,12 +179,11 @@ class DebateEpisode(AlternatingRolesEpisode):
         state: EpisodeState,
     ) -> str:
         topic = artifact.get("topic", "Unknown topic")
+        initial_actor = self.get_initial_actor(artifact)
+        side = "affirmative" if initial_actor == self.aff_role_id else "negative"
         state.data["topic"] = topic
 
-        return f"""Topic: {topic}
-
-You are arguing for the affirmative side.
-This is your opening statement. Present your main argument."""
+        return f"Topic: {topic}"
 
     async def env_response(
         self,
@@ -155,7 +194,8 @@ This is your opening statement. Present your main argument."""
         """Return transition text for next speaker."""
         next_role_id = self.get_next_actor(state, artifact)
         side = "affirmative" if next_role_id == self.aff_role_id else "negative"
-        return f"You are arguing for the {side} side. Respond to your opponent's points."
+        # return f"You are arguing for the {side} side. Respond to your opponent's points. Be concise."
+        return ""
 
     def get_extras(self, state: EpisodeState) -> Dict[str, Any]:
         return {
@@ -171,8 +211,14 @@ This is your opening statement. Present your main argument."""
 class DebateArena(Arena):
     """Arena that schedules debate episodes from a topic store."""
 
-    def __init__(self, client: InferenceClient, batch_size: int = 4):
-        super().__init__(client)
+    def __init__(
+        self,
+        client: InferenceClient,
+        batch_size: int = 4,
+        verbose: bool = False,
+        credit_assigner: CreditAssigner | None = None,
+    ):
+        super().__init__(client, credit_assigner=credit_assigner, verbose=verbose)
         self.batch_size = batch_size
 
     def get_batch(self) -> List[EpisodeRequest]:
@@ -199,24 +245,30 @@ def create_debate_arena(
     topics: List[str] | None = None,
     num_rounds: int = 3,
     batch_size: int = 4,
+    verbose: bool = False,
 ) -> DebateArena:
     """Create a complete debate arena."""
-    arena = DebateArena(client, batch_size=batch_size)
+    arena = DebateArena(
+        client,
+        batch_size=batch_size,
+        verbose=verbose,
+        credit_assigner=GRPOCredit(),
+    )
 
     arena.add_role(Role(
         id="Aff",
-        system_prompt="You are a skilled debater arguing for the affirmative side. "
-                      "Make clear, persuasive arguments supported by logic and evidence.",
+        system_prompt="You are a skilled debater arguing for the AFFIRMATIVE side (supporting the proposition). "
+                      "Make clear, persuasive arguments supported by logic and evidence. Be concise. Each of your turns should be no more than 3 sentences.",
         temperature=0.8,
-        max_tokens=300,
+        max_tokens=1024,
     ))
 
     arena.add_role(Role(
         id="Neg",
-        system_prompt="You are a skilled debater arguing for the negative side. "
-                      "Make clear, persuasive arguments supported by logic and evidence.",
+        system_prompt="You are a skilled debater arguing for the NEGATIVE side (opposing the proposition). "
+                      "Make clear, persuasive arguments supported by logic and evidence. Be concise. Each of your turns should be no more than 3 sentences.",
         temperature=0.8,
-        max_tokens=300,
+        max_tokens=1024,
     ))
 
     arena.add_episode("debate", DebateEpisode(num_rounds=num_rounds))

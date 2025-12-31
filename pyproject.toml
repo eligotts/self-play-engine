@@ -3,7 +3,9 @@ name = "self-play-engine"
 version = "0.1.0"
 description = "A modular self-play LLM RL engine with clean abstractions"
 requires-python = ">=3.10"
-dependencies = []
+dependencies = [
+    "httpx>=0.25",
+]
 
 [project.optional-dependencies]
 dev = [
