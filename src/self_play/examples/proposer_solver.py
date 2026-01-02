@@ -120,7 +120,7 @@ class SolveEpisode(SingleTurnEpisode):
     def rubric(self) -> Rubric:
         return self._rubric
 
-    def get_initial_actor(self, artifact: Any) -> str:
+    def get_initial_actor(self, artifact: Any, state: EpisodeState) -> str:
         return self.solver_role_id
 
     def get_initial_prompt(
@@ -207,7 +207,7 @@ class ProposerEpisode(Episode):
             }
 
             requests = [
-                EpisodeRequest(episode_type="solve", artifact=solver_artifact)
+                EpisodeRequest(episode_type="solve", artifact=solver_artifact, is_trainable=False)
                 for _ in range(self.n_solver_rollouts)
             ]
             results = await arena.generate_rollouts(requests)
@@ -221,8 +221,9 @@ class ProposerEpisode(Episode):
         arena: Arena,
         artifact: Any,
         meta: Optional[Dict[str, Any]] = None,
+        is_trainable: bool = True,
     ) -> GenerateResult:
-        result = await super().generate(arena, artifact, meta=meta)
+        result = await super().generate(arena, artifact, meta=meta, is_trainable=is_trainable)
 
         proposed = result.rollout.extras.get("proposed_question")
         if proposed and proposed.get("question") and proposed.get("ground_truth"):

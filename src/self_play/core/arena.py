@@ -147,6 +147,7 @@ class EpisodeRequest:
     episode_type: str
     artifact: Any
     meta: Dict[str, Any] = None
+    is_trainable: bool = True
 
     def __post_init__(self):
         if self.meta is None:
@@ -258,8 +259,17 @@ class Arena:
                 for msg in messages:
                     msg_role = msg.get("role", "?")
                     content = msg.get("content", "")
-                    lines.append(f"      [{msg_role}] {content}")
-                lines.append(f"      [response] {response.text if response.text else '(empty)'}")
+                    # Truncate to short snippet
+                    snippet = content[:80].replace("\n", " ")
+                    if len(content) > 80:
+                        snippet += "..."
+                    lines.append(f"      [{msg_role}] {snippet}")
+                # Truncate response to short snippet
+                resp_text = response.text if response.text else "(empty)"
+                resp_snippet = resp_text[:120].replace("\n", " ")
+                if len(resp_text) > 120:
+                    resp_snippet += "..."
+                lines.append(f"      [response] {resp_snippet}")
                 print("\n".join(lines))
 
             return response
@@ -295,10 +305,11 @@ class Arena:
         episode_type: str,
         artifact: Any,
         meta: Optional[Dict[str, Any]] = None,
+        is_trainable: bool = True,
     ) -> GenerateResult:
         """Run a single episode."""
         episode = self.episodes[episode_type]
-        return await episode.generate(self, artifact, meta=meta)
+        return await episode.generate(self, artifact, meta=meta, is_trainable=is_trainable)
 
     async def resolve_artifact(self, request: EpisodeRequest) -> Any:
         """
@@ -330,6 +341,7 @@ class Arena:
                     request.episode_type,
                     artifact,
                     meta=request.meta,
+                    is_trainable=request.is_trainable,
                 )
 
         tasks = [asyncio.create_task(run_one(req)) for req in requests]
@@ -355,6 +367,11 @@ class Arena:
 
         def process(result: GenerateResult) -> None:
             nonlocal skipped_steps
+
+            # Skip non-trainable results and their entire subtrees
+            if not result.is_trainable:
+                return
+
             rollout = result.rollout
 
             for step in rollout.steps:
@@ -365,8 +382,6 @@ class Arena:
                     continue
 
                 action_mask = [0] * len(step.prompt_token_ids) + [1] * len(step.completion_token_ids)
-
-                # maybe here just not add the record if advantage is 0?
 
                 records.append(TrainingRecord(
                     role_id=step.role_id,
@@ -417,9 +432,13 @@ class Arena:
         print("SANITY CHECK: build_training_batch")
         print("=" * 60)
 
-        # Count expected steps from results
+        # Count expected steps from results (only from trainable results)
         def count_steps(result: GenerateResult) -> tuple[int, int]:
-            """Returns (total_steps, trainable_steps)"""
+            """Returns (total_steps, trainable_steps) for trainable results only."""
+            # Skip non-trainable results and their subtrees
+            if not result.is_trainable:
+                return 0, 0
+
             total = 0
             trainable = 0
             for step in result.rollout.steps:
@@ -452,8 +471,12 @@ class Arena:
         else:
             print(f"  ✗ MISMATCH: {len(batch.records)} records vs {trainable_steps} trainable steps")
 
-        # Show reward/advantage distribution by hierarchy level
+        # Show reward/advantage distribution by hierarchy level (only trainable results)
         def collect_rewards(result: GenerateResult, level: int, data: list) -> None:
+            # Skip non-trainable results and their subtrees
+            if not result.is_trainable:
+                return
+
             for step in result.rollout.steps:
                 data.append({
                     "level": level,

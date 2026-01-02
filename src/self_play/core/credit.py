@@ -68,6 +68,10 @@ def apply_credit(
         weights: Mapping from (rollout_id, step_index) -> advantage
     """
     def apply_to_result(result: GenerateResult) -> None:
+        # Skip non-trainable results and their entire subtrees
+        if not result.is_trainable:
+            return
+
         rollout = result.rollout
         for i, step in enumerate(rollout.steps):
             key = (rollout.id, i)
@@ -179,9 +183,15 @@ class GRPOCredit(CreditAssigner):
         if not results:
             return
 
+        # Filter to only trainable results - non-trainable results and their
+        # entire subtrees are excluded from credit assignment
+        trainable_results = [r for r in results if r.is_trainable]
+        if not trainable_results:
+            return
+
         # Group results by episode type for per-type advantage computation.
         groups: Dict[str, List[GenerateResult]] = {}
-        for result in results:
+        for result in trainable_results:
             groups.setdefault(result.rollout.episode_type, []).append(result)
 
         for group_results in groups.values():
@@ -218,7 +228,8 @@ class GRPOCredit(CreditAssigner):
                         weights[(rollout.id, i)] = adv
 
         # Recurse into children (each parent's children form independent groups)
-        for result in results:
+        # Only recurse into trainable results - non-trainable subtrees are skipped
+        for result in trainable_results:
             if result.children:
                 self._compute_level(result.children, weights)
 
@@ -250,6 +261,10 @@ class ConstantCredit(CreditAssigner):
         weights: Dict[RolloutStepKey, float],
     ) -> None:
         for result in results:
+            # Skip non-trainable results and their entire subtrees
+            if not result.is_trainable:
+                continue
+
             rollout = result.rollout
             for i, _ in enumerate(rollout.steps):
                 weights[(rollout.id, i)] = self.value
@@ -280,6 +295,10 @@ class EpisodicRewardCredit(CreditAssigner):
         weights: Dict[RolloutStepKey, float],
     ) -> None:
         for result in results:
+            # Skip non-trainable results and their entire subtrees
+            if not result.is_trainable:
+                continue
+
             rollout = result.rollout
 
             for i, step in enumerate(rollout.steps):

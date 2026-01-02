@@ -12,6 +12,12 @@ dev = [
     "pytest>=7.0",
     "pytest-asyncio>=0.21",
 ]
+training = [
+    "mlx>=0.0.10",
+    "mlx-lm>=0.0.10",
+    "safetensors>=0.4.0",
+    "numpy>=1.24.0",
+]
 
 [build-system]
 requires = ["hatchling"]

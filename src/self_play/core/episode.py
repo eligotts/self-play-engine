@@ -12,6 +12,7 @@ Provided patterns:
 """
 from __future__ import annotations
 
+import random
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
@@ -32,6 +33,7 @@ class GenerateResult:
     """Result from episode.generate(), supports hierarchical episodes."""
     rollout: Rollout
     children: List["GenerateResult"] = field(default_factory=list)
+    is_trainable: bool = True
 
     @property
     def rewards(self) -> Dict[str, float]:
@@ -165,6 +167,7 @@ class Episode(ABC):
         arena: Arena,
         artifact: Any,
         meta: Optional[Dict[str, Any]] = None,
+        is_trainable: bool = True,
     ) -> GenerateResult:
         """
         Top-level entry point for episode execution.
@@ -173,6 +176,10 @@ class Episode(ABC):
         2. Build Rollout with standard fields
         3. Score with rubric (sets step.reward and rollout.reward)
         4. Return GenerateResult with children
+
+        Args:
+            is_trainable: If False, this episode's steps won't be used for training.
+                          Credit assignment will skip non-trainable results and their children.
         """
         import time
 
@@ -194,6 +201,7 @@ class Episode(ABC):
         return GenerateResult(
             rollout=rollout,
             children=state.child_results,
+            is_trainable=is_trainable,
         )
 
 
@@ -219,7 +227,7 @@ async def run_chat_loop(
     System prompts are loaded dynamically based on the current actor.
     History is built as a string, with env_response returning strings to append.
     """
-    state.current_actor = get_initial_actor(artifact)
+    state.current_actor = get_initial_actor(artifact, state)
 
     # Get initial history from get_initial_prompt (system prompt is now loaded dynamically per actor)
     history: str = get_initial_prompt(arena, artifact, state)
@@ -238,6 +246,8 @@ async def run_chat_loop(
             user_string = "Conversation history: \n\n" + history + "\n\nEnd of conversation history."
         else:
             user_string = history
+
+        user_string += "\n\n/no_think"
         prompt.append({"role": "user", "content": user_string})
 
         # Call model
@@ -285,7 +295,7 @@ class ChatEpisode(Episode):
     """
 
     @abstractmethod
-    def get_initial_actor(self, artifact: Any) -> str:
+    def get_initial_actor(self, artifact: Any, state: EpisodeState) -> str:
         ...
 
     @abstractmethod
@@ -376,8 +386,11 @@ class AlternatingRolesEpisode(MultiTurnEpisode):
     def roles(self) -> tuple[str, str]:
         ...
 
-    def get_initial_actor(self, artifact: Any) -> str:
-        return self.roles[1]
+    def get_initial_actor(self, artifact: Any, state: EpisodeState) -> str:
+        start_idx = random.randint(0, 1)
+        state.data["start_idx"] = start_idx
+        return self.roles[start_idx]
 
     def get_next_actor(self, state: EpisodeState, artifact: Any) -> str:
-        return self.roles[(state.turn + 1) % 2]
+        start_idx = state.data.get("start_idx", 0)
+        return self.roles[(start_idx + state.turn) % 2]

@@ -64,7 +64,7 @@ Rules:
 Example valid response:
 {{"winner": "{neg_role}", "score": 0.65, "reasoning": "{neg_role} provided stronger evidence and effectively rebutted {aff_role}'s main points."}}
 
-Now evaluate the following debate transcript and respond with ONLY JSON:"""
+Now evaluate the following debate transcript and respond with ONLY JSON: /no_think"""
 
     async def llm_judge(rollout: Rollout, arena: Arena) -> Dict[str, float]:
         if not rollout.steps:
@@ -179,7 +179,7 @@ class DebateEpisode(AlternatingRolesEpisode):
         state: EpisodeState,
     ) -> str:
         topic = artifact.get("topic", "Unknown topic")
-        initial_actor = self.get_initial_actor(artifact)
+        initial_actor = state.current_actor
         side = "affirmative" if initial_actor == self.aff_role_id else "negative"
         state.data["topic"] = topic
 
