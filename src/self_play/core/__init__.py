@@ -8,22 +8,29 @@ Simple, focused:
 - Arena: persistent state + orchestration
 """
 from .types import (
+    # Message types
     Message,
     Messages,
+    # Core types
     Role,
     Step,
     Rollout,
     TrainingRecord,
+    # Inference types
+    ModelResponse,
+    # Artifact types
+    Artifact,
+    # Episode types
+    GenerateResult,
+    EpisodeRequest,
+    TrainingBatch,
 )
 
 from .episode import (
     Episode,
     EpisodeState,
-    GenerateResult,
-    ChatEpisode,
     SingleTurnEpisode,
     MultiTurnEpisode,
-    AlternatingRolesEpisode,
 )
 
 from .rubric import Rubric, RewardFn
@@ -32,23 +39,22 @@ from .credit import (
     RolloutStepKey,
     CreditAssigner,
     GRPOCredit,
+    RAECredit,
     ConstantCredit,
     EpisodicRewardCredit,
     apply_credit,
 )
 
-from .arena import (
-    ModelResponse,
+from .clients import (
     InferenceClient,
     MockInferenceClient,
-    Artifact,
-    ArtifactStore,
-    EpisodeRequest,
-    TrainingBatch,
-    Arena,
+    OpenAIClient,
 )
 
-from .clients import OpenAIClient
+from .arena import (
+    ArtifactStore,
+    Arena,
+)
 
 from .logging import VerboseLogger
 
@@ -60,14 +66,16 @@ __all__ = [
     "Step",
     "Rollout",
     "TrainingRecord",
+    "ModelResponse",
+    "Artifact",
+    "GenerateResult",
+    "EpisodeRequest",
+    "TrainingBatch",
     # Episode
     "Episode",
     "EpisodeState",
-    "GenerateResult",
-    "ChatEpisode",
     "SingleTurnEpisode",
     "MultiTurnEpisode",
-    "AlternatingRolesEpisode",
     # Rubric
     "Rubric",
     "RewardFn",
@@ -75,20 +83,17 @@ __all__ = [
     "RolloutStepKey",
     "CreditAssigner",
     "GRPOCredit",
+    "RAECredit",
     "ConstantCredit",
     "EpisodicRewardCredit",
     "apply_credit",
-    # Arena
-    "ModelResponse",
+    # Clients
     "InferenceClient",
     "MockInferenceClient",
-    "Artifact",
-    "ArtifactStore",
-    "EpisodeRequest",
-    "TrainingBatch",
-    "Arena",
-    # Clients
     "OpenAIClient",
+    # Arena
+    "ArtifactStore",
+    "Arena",
     # Logging
     "VerboseLogger",
 ]

@@ -1,18 +1,27 @@
 """
 Core types for the self-play engine.
 
-Minimal set of types:
+All data structures are defined here:
+- Message types: Message, Messages
 - Role: a trainable entity (only trainable entities are roles)
 - Step: one model call in a rollout
 - Rollout: complete trace of an episode (includes artifact + metadata)
 - TrainingRecord: what gets sent to the trainer
+- ModelResponse: response from inference client
+- GenerateResult: result from episode generation
+- Artifact: item in artifact store
+- EpisodeRequest: request to run an episode
+- TrainingBatch: batch of training records
 """
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, TYPE_CHECKING
 import uuid
 import time
+
+if TYPE_CHECKING:
+    pass  # For future type-only imports
 
 # Message format (OpenAI-style)
 Message = Dict[str, Any]  # {"role": "system"|"user"|"assistant", "content": "..."}
@@ -103,6 +112,11 @@ class Rollout:
     started_at: float = field(default_factory=time.time)
     ended_at: Optional[float] = None
 
+    @property
+    def actors(self) -> set[str]:
+        """Return unique role IDs from all steps in this rollout."""
+        return {step.role_id for step in self.steps}
+
 
 @dataclass
 class TrainingRecord:
@@ -133,3 +147,77 @@ class TrainingRecord:
     @property
     def input_ids(self) -> List[int]:
         return self.prompt_token_ids + self.completion_token_ids
+
+
+# ---------------------------------------------------------------------------
+# Inference Types
+# ---------------------------------------------------------------------------
+
+@dataclass
+class ModelResponse:
+    """Response from a model call."""
+    text: str
+    completion: Messages
+
+    prompt_token_ids: Optional[List[int]] = None
+    completion_token_ids: Optional[List[int]] = None
+    completion_logprobs: Optional[List[float]] = None
+
+
+# ---------------------------------------------------------------------------
+# Artifact Types
+# ---------------------------------------------------------------------------
+
+@dataclass
+class Artifact:
+    """An item in an artifact store."""
+    id: str
+    data: Dict[str, Any]
+
+
+# ---------------------------------------------------------------------------
+# Episode Request/Result Types
+# ---------------------------------------------------------------------------
+
+@dataclass
+class EpisodeRequest:
+    """Request to run an episode with a resolved artifact payload."""
+    episode_type: str
+    artifact: Any
+    meta: Dict[str, Any] = None
+    is_trainable: bool = True
+
+    def __post_init__(self):
+        if self.meta is None:
+            self.meta = {}
+
+
+@dataclass
+class GenerateResult:
+    """Result from episode.generate(), supports hierarchical episodes."""
+    rollout: Rollout
+    children: List["GenerateResult"] = field(default_factory=list)
+    is_trainable: bool = True
+
+    @property
+    def rewards(self) -> Dict[str, float]:
+        """Rewards dict from the rollout (role_id -> reward)."""
+        return self.rollout.rewards
+
+    def all_rollouts(self) -> List[Rollout]:
+        """Flatten tree into list of rollouts."""
+        result = [self.rollout]
+        for child in self.children:
+            result.extend(child.all_rollouts())
+        return result
+
+
+# ---------------------------------------------------------------------------
+# Training Batch Types
+# ---------------------------------------------------------------------------
+
+@dataclass
+class TrainingBatch:
+    """Batch of training records ready for the trainer."""
+    records: List[TrainingRecord]
+    meta: Dict[str, Any]

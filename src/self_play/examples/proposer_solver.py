@@ -20,7 +20,6 @@ import json
 from typing import Any, Dict, List, Optional
 
 from ..core import (
-    Role,
     Messages,
     Rollout,
     Episode,
@@ -41,64 +40,72 @@ from ..core import (
 # Rubrics
 # ---------------------------------------------------------------------------
 
-def make_solver_rubric(solver_role: str) -> Rubric:
+def solver_exact_match(rollout: Rollout, arena: Arena) -> Dict[str, float]:
     """
     Rubric for solver: exact match against ground truth.
+    Discovers actor dynamically from rollout.
     """
-    def exact_match(rollout: Rollout, arena: Arena) -> Dict[str, float]:
-        # Extract answer from last step
-        if not rollout.steps:
-            return {solver_role: 0.0}
+    if not rollout.actors:
+        return {}
 
-        completion = rollout.steps[-1].completion_text
-        if "The answer is:" in completion:
-            answer = completion.split("The answer is:")[-1].strip().rstrip(".")
-        else:
-            answer = completion.strip().split("\n")[-1]
+    actor = next(iter(rollout.actors))
+    completion = rollout.steps[-1].completion_text
 
-        # Compare to ground truth
-        ground_truth = str(rollout.artifact.get("ground_truth", "")).strip().lower()
-        predicted = answer.strip().lower()
+    if "The answer is:" in completion:
+        answer = completion.split("The answer is:")[-1].strip().rstrip(".")
+    else:
+        answer = completion.strip().split("\n")[-1]
 
-        reward = 1.0 if predicted == ground_truth else 0.0
+    # Compare to ground truth
+    ground_truth = str(rollout.artifact.get("ground_truth", "")).strip().lower()
+    predicted = answer.strip().lower()
 
+    reward = 1.0 if predicted == ground_truth else 0.0
+
+    if arena.verbose:
         if reward == 0.0:
             print(f"    [solver_rubric] MISMATCH: predicted='{predicted[:40]}' vs ground_truth='{ground_truth}' → reward=0.0")
         else:
             print(f"    [solver_rubric] MATCH: predicted='{predicted[:40]}' vs ground_truth='{ground_truth}' → reward=1.0")
 
-        return {solver_role: reward}
-
-    return Rubric(funcs=[exact_match])
+    return {actor: reward}
 
 
-def make_proposer_rubric(proposer_role: str, target_pass_rate: float = 0.5) -> Rubric:
+def proposer_pass_rate_reward(
+    rollout: Rollout,
+    arena: Arena,
+    target_pass_rate: float = 0.5,
+) -> Dict[str, float]:
     """
     Rubric for proposer: reward based on solver pass rate.
+    Discovers actor dynamically from rollout.
 
     Target ~50% pass rate (not too easy, not too hard).
     """
-    def pass_rate_reward(rollout: Rollout, arena: Arena) -> Dict[str, float]:
-        proposed = rollout.extras.get("proposed_question")
+    if not rollout.actors:
+        return {}
 
-        # Invalid question = negative reward
-        if not proposed or not proposed.get("question") or not proposed.get("ground_truth"):
+    actor = next(iter(rollout.actors))
+    proposed = rollout.extras.get("proposed_question")
+
+    # Invalid question = negative reward
+    if not proposed or not proposed.get("question") or not proposed.get("ground_truth"):
+        if arena.verbose:
             print(f"    [proposer_rubric] invalid question → reward=-1.0")
-            return {proposer_role: -1.0}
+        return {actor: -1.0}
 
-        # Get pass rate from extras (computed in get_extras)
-        pass_rate = rollout.extras.get("pass_rate", 0.0)
+    # Get pass rate from extras (computed in get_extras)
+    pass_rate = rollout.extras.get("pass_rate", 0.0)
 
-        # Reward peaks at target pass rate
-        distance = abs(pass_rate - target_pass_rate)
-        reward = 1.0 - (distance * 2)  # Max 1.0 at target, 0.0 at extremes
-        final_reward = max(-0.5, reward)
+    # Reward peaks at target pass rate
+    distance = abs(pass_rate - target_pass_rate)
+    reward = 1.0 - (distance * 2)  # Max 1.0 at target, 0.0 at extremes
+    final_reward = max(-0.5, reward)
 
-        print(f"    [proposer_rubric] pass_rate={pass_rate}, target={target_pass_rate}, distance={distance}, raw_reward={reward}, final_reward={final_reward}")
+    if arena.verbose:
+        print(f"    [proposer_rubric] pass_rate={pass_rate:.2f}, target={target_pass_rate}, reward={final_reward:.2f}")
 
-        return {proposer_role: final_reward}
-
-    return Rubric(funcs=[pass_rate_reward])
+    return {actor: final_reward}
 
 
 # ---------------------------------------------------------------------------
@@ -110,7 +117,7 @@ class SolveEpisode(SingleTurnEpisode):
 
     def __init__(self, solver_role_id: str = "Solver"):
         self.solver_role_id = solver_role_id
-        self._rubric = make_solver_rubric(solver_role_id)
+        self._rubric = Rubric(funcs=[solver_exact_match])
 
     @property
     def episode_type(self) -> str:
@@ -136,7 +143,7 @@ class SolveEpisode(SingleTurnEpisode):
 {question}
 
 Think step by step, then provide your final answer.
-You MUST end your response with: "The answer is: <your answer>\""""
+You MUST end your response with: "The answer is: " followed by the answer."""
 
 
 # ---------------------------------------------------------------------------
@@ -162,7 +169,7 @@ class ProposerEpisode(Episode):
         self.proposer_role_id = proposer_role_id
         self.n_solver_rollouts = n_solver_rollouts
         self.target_pass_rate = target_pass_rate
-        self._rubric = make_proposer_rubric(proposer_role_id, target_pass_rate)
+        self._rubric = Rubric(funcs=[proposer_pass_rate_reward])
 
     @property
     def episode_type(self) -> str:
@@ -279,27 +286,14 @@ class ProposerEpisode(Episode):
 
     def get_extras(self, state: EpisodeState) -> Dict[str, Any]:
         """Include child results summary for rubric."""
-        child_rewards = [
-            child.rewards.get("Solver", 0.0)
-            for child in state.child_results
-        ]
+        # Get reward for each child using the child's actor
+        child_rewards = []
+        for child in state.child_results:
+            actor = next(iter(child.rollout.actors)) if child.rollout.actors else None
+            reward = child.rewards.get(actor, 0.0) if actor else 0.0
+            child_rewards.append(reward)
+
         pass_rate = sum(1 for r in child_rewards if r > 0.5) / len(child_rewards) if child_rewards else 0.0
-
-        # Debug logging for proposer reward diagnosis
-        print(f"    [get_extras] child_results count: {len(state.child_results)}")
-        print(f"    [get_extras] child_rewards: {child_rewards}")
-        print(f"    [get_extras] pass_rate: {pass_rate}")
-
-        # Log individual solver answers for debugging
-        for i, child in enumerate(state.child_results):
-            solver_answer = child.rollout.steps[-1].completion_text if child.rollout.steps else "(no steps)"
-            # Extract just the answer portion
-            if "The answer is:" in solver_answer:
-                extracted = solver_answer.split("The answer is:")[-1].strip().rstrip(".")[:50]
-            else:
-                extracted = solver_answer[-50:] if solver_answer else "(empty)"
-            ground_truth = child.rollout.artifact.get("ground_truth", "?")
-            print(f"    [get_extras] solver[{i}]: extracted='{extracted}' vs ground_truth='{ground_truth}' → reward={child.rewards.get('Solver', 0.0)}")
 
         return {
             "proposed_question": state.data.get("proposed_question"),
@@ -339,51 +333,3 @@ class ProposerSolverArena(Arena):
                     artifact={"examples": examples},
                 ))
         return propose_requests + solve_requests
-
-
-# ---------------------------------------------------------------------------
-# Factory
-# ---------------------------------------------------------------------------
-
-def create_proposer_solver_arena(
-    client: InferenceClient,
-    initial_questions: Optional[List[Dict[str, str]]] = None,
-    n_solver_rollouts: int = 4,
-    batch_size: int = 4,
-    verbose: bool = False,
-) -> ProposerSolverArena:
-    """Create a complete proposer/solver arena."""
-    arena = ProposerSolverArena(client, batch_size=batch_size, verbose=verbose)
-
-    arena.add_role(Role(
-        id="Proposer",
-        system_prompt="You are a creative math problem creator. "
-                      "Generate interesting, well-formed problems with clear answers."
-                      "Ensure that in your question you explicitly state the form the answer should be provided in.",
-        temperature=0.9,
-        max_tokens=1024,
-    ))
-
-    arena.add_role(Role(
-        id="Solver",
-        system_prompt="You are a skilled math problem solver. "
-                      "Think step by step and provide clear, correct answers."
-                      "Ensure that your answer is provided in the form specified in the question.",
-        temperature=0.7,
-        max_tokens=1024,
-    ))
-
-    question_store = arena.add_store("questions")
-    if initial_questions is None:
-        initial_questions = [
-            {"question": "What is 15 + 27? Answer in the form of a number.", "ground_truth": "42"},
-            {"question": "If x + 5 = 12, what is x? Answer in the form of just the number, no 'x = '.", "ground_truth": "7"},
-            {"question": "What is 8 * 5? Answer in the form of a number.", "ground_truth": "40"},
-        ]
-    for i, q in enumerate(initial_questions):
-        question_store.add(Artifact(id=f"seed_{i}", data=q))
-
-    arena.add_episode("propose", ProposerEpisode(n_solver_rollouts=n_solver_rollouts))
-    arena.add_episode("solve", SolveEpisode())
-
-    return arena

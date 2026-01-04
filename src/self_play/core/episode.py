@@ -5,47 +5,20 @@ Episodes are composable units of work tied together by reward dependency.
 The base Episode class is minimal - subclasses implement rollout() however they need.
 
 Provided patterns:
-- ChatEpisode: Standard turn-taking conversation loop
+- MultiTurnEpisode: Standard turn-taking conversation loop with optional max turns
 - SingleTurnEpisode: One prompt, one completion
-- MultiTurnEpisode: Chat with max turns
-- AlternatingRolesEpisode: Two roles taking turns
 """
 from __future__ import annotations
 
-import random
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
-from .types import Messages, Rollout, Step
+from .types import GenerateResult, Messages, ModelResponse, Rollout, Step
 from .rubric import Rubric
 
 if TYPE_CHECKING:
-    from .arena import Arena, ModelResponse
-
-
-# ---------------------------------------------------------------------------
-# Result Types
-# ---------------------------------------------------------------------------
-
-@dataclass
-class GenerateResult:
-    """Result from episode.generate(), supports hierarchical episodes."""
-    rollout: Rollout
-    children: List["GenerateResult"] = field(default_factory=list)
-    is_trainable: bool = True
-
-    @property
-    def rewards(self) -> Dict[str, float]:
-        """Rewards dict from the rollout (role_id -> reward)."""
-        return self.rollout.rewards
-
-    def all_rollouts(self) -> List[Rollout]:
-        """Flatten tree into list of rollouts."""
-        result = [self.rollout]
-        for child in self.children:
-            result.extend(child.all_rollouts())
-        return result
+    from .arena import Arena
 
 
 # ---------------------------------------------------------------------------
@@ -146,7 +119,7 @@ class Episode(ABC):
         role_id: str,
         messages: Messages,
         arena: Arena,
-    ) -> "ModelResponse":
+    ) -> ModelResponse:
         """Make a model call for a role."""
         return await arena.call_model(messages, role_id=role_id)
 
@@ -206,10 +179,10 @@ class Episode(ABC):
 
 
 # ---------------------------------------------------------------------------
-# Chat Loop Helper
+# Chat Loop Helper (Private)
 # ---------------------------------------------------------------------------
 
-async def run_chat_loop(
+async def _run_chat_loop(
     episode: Episode,
     arena: Arena,
     artifact: Any,
@@ -283,16 +256,25 @@ async def run_chat_loop(
 
 
 # ---------------------------------------------------------------------------
-# Chat Episode Base Class
+# Multi-Turn Episode Base Class
 # ---------------------------------------------------------------------------
 
-class ChatEpisode(Episode):
+class MultiTurnEpisode(Episode):
     """
     Episode with standard turn-taking chat loop.
 
-    Subclasses implement the chat-specific methods:
-    - get_initial_actor, get_initial_prompt, env_response, is_done, get_next_actor
+    Subclasses must implement:
+    - get_initial_actor: which role starts
+    - get_initial_prompt: the initial history string
+
+    Subclasses may override:
+    - env_response: string to append between turns (default: "")
+    - get_next_actor: which role goes next (default: same actor)
+    - is_done: when to stop (default: check max_turns)
     """
+
+    def __init__(self, max_turns: int = -1):
+        self.max_turns = max_turns
 
     @abstractmethod
     def get_initial_actor(self, artifact: Any, state: EpisodeState) -> str:
@@ -308,7 +290,6 @@ class ChatEpisode(Episode):
         """Return the initial history string. System prompts are loaded dynamically per actor."""
         ...
 
-    @abstractmethod
     async def env_response(
         self,
         state: EpisodeState,
@@ -316,15 +297,15 @@ class ChatEpisode(Episode):
         artifact: Any,
     ) -> str:
         """Return a string to append to the history for the next turn."""
-        ...
+        return ""
 
-    @abstractmethod
     def is_done(self, state: EpisodeState, artifact: Any) -> bool:
-        ...
+        if self.max_turns > 0 and state.turn >= self.max_turns:
+            return True
+        return False
 
-    @abstractmethod
     def get_next_actor(self, state: EpisodeState, artifact: Any) -> str:
-        ...
+        return state.current_actor
 
     async def rollout(
         self,
@@ -336,7 +317,7 @@ class ChatEpisode(Episode):
         if state is None:
             state = EpisodeState()
 
-        return await run_chat_loop(
+        return await _run_chat_loop(
             episode=self,
             arena=arena,
             artifact=artifact,
@@ -350,47 +331,11 @@ class ChatEpisode(Episode):
 
 
 # ---------------------------------------------------------------------------
-# Convenience Subclasses
+# Single-Turn Episode
 # ---------------------------------------------------------------------------
 
-class SingleTurnEpisode(ChatEpisode):
-    """Single model call episode."""
+class SingleTurnEpisode(MultiTurnEpisode):
+    """Single model call episode (one prompt, one completion)."""
 
     def is_done(self, state: EpisodeState, artifact: Any) -> bool:
         return state.turn >= 1
-
-    async def env_response(self, state: EpisodeState, arena: Arena, artifact: Any) -> str:
-        return ""
-
-    def get_next_actor(self, state: EpisodeState, artifact: Any) -> str:
-        return state.current_actor
-
-
-class MultiTurnEpisode(ChatEpisode):
-    """Multi-turn chat with optional max turns."""
-
-    def __init__(self, max_turns: int = -1):
-        self.max_turns = max_turns
-
-    def is_done(self, state: EpisodeState, artifact: Any) -> bool:
-        if self.max_turns > 0 and state.turn >= self.max_turns:
-            return True
-        return False
-
-
-class AlternatingRolesEpisode(MultiTurnEpisode):
-    """Two roles taking turns."""
-
-    @property
-    @abstractmethod
-    def roles(self) -> tuple[str, str]:
-        ...
-
-    def get_initial_actor(self, artifact: Any, state: EpisodeState) -> str:
-        start_idx = random.randint(0, 1)
-        state.data["start_idx"] = start_idx
-        return self.roles[start_idx]
-
-    def get_next_actor(self, state: EpisodeState, artifact: Any) -> str:
-        start_idx = state.data.get("start_idx", 0)
-        return self.roles[(start_idx + state.turn) % 2]

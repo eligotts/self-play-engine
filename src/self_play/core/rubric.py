@@ -95,12 +95,11 @@ class Rubric:
                 rollout.metrics[func_name] = next(iter(result.values()))
 
         # Validate all roles are scored
-        step_roles = {step.role_id for step in rollout.steps}
-        for role_id in step_roles:
+        for role_id in rollout.actors:
             if role_id not in rollout.rewards:
                 raise ValueError(
                     f"No reward function scored role '{role_id}'. "
-                    f"Roles in steps: {step_roles}, "
+                    f"Actors in rollout: {rollout.actors}, "
                     f"roles scored: {set(rollout.rewards.keys())}"
                 )
 

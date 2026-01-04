@@ -7,7 +7,6 @@ base64 encoding, and HTTP POST to the mlx-vllm /adapters/load endpoint.
 from __future__ import annotations
 
 import base64
-import time
 from typing import Optional
 
 import httpx
@@ -59,81 +58,55 @@ class WeightPublisher:
             self._client = httpx.AsyncClient(timeout=self.timeout)
         return self._client
 
-    async def publish(
-        self,
-        model,
-        version: int,
-        verbose: bool = False,
-    ) -> dict:
+    async def publish(self, model, version: int) -> dict:
         """
         Push updated LoRA weights to the inference server.
 
         Args:
             model: MLX model with trainable LoRA parameters
             version: Version number (typically training step)
-            verbose: Print timing info
 
         Returns:
             Response dict from server with {"status": "ok", "version": N}
         """
-        timings = {}
-
-        # 1. Extract LoRA weights (trainable parameters only)
-        t0 = time.perf_counter()
+        # Extract LoRA weights (trainable parameters only)
         adapter_weights = dict(tree_flatten(model.trainable_parameters()))
-        timings["extract"] = time.perf_counter() - t0
 
         if not adapter_weights:
             raise ValueError("Model has no trainable parameters. Did you attach LoRA?")
 
-        # 2. Evaluate to materialize lazy arrays
-        t0 = time.perf_counter()
+        # Evaluate to materialize lazy arrays
         mx.eval(adapter_weights)
-        timings["eval"] = time.perf_counter() - t0
 
-        # 3. Convert to numpy (cast bfloat16 to float32 since numpy doesn't support bf16)
-        t0 = time.perf_counter()
+        # Convert to numpy (cast bfloat16 to float32 since numpy doesn't support bf16)
         def to_numpy(arr: mx.array) -> np.ndarray:
             if arr.dtype == mx.bfloat16:
                 return np.array(arr.astype(mx.float32))
             return np.array(arr)
 
         weights_np = {k: to_numpy(v) for k, v in adapter_weights.items()}
-        timings["to_numpy"] = time.perf_counter() - t0
 
-        # 4. Serialize to safetensors
-        t0 = time.perf_counter()
+        # Serialize to safetensors and base64 encode
         weight_bytes = save_safetensors(weights_np)
-        timings["safetensors"] = time.perf_counter() - t0
-
-        # 5. Base64 encode
-        t0 = time.perf_counter()
         weights_b64 = base64.b64encode(weight_bytes).decode("utf-8")
-        timings["base64"] = time.perf_counter() - t0
 
-        if verbose:
-            total_bytes = len(weight_bytes)
-            print(f"      [publish] {len(adapter_weights)} tensors, {total_bytes/1024:.1f}KB")
-            print(f"      [publish] extract={timings['extract']*1000:.1f}ms, "
-                  f"eval={timings['eval']*1000:.1f}ms, "
-                  f"numpy={timings['to_numpy']*1000:.1f}ms, "
-                  f"safetensors={timings['safetensors']*1000:.1f}ms, "
-                  f"base64={timings['base64']*1000:.1f}ms")
-
-        # 6. POST to /adapters/load
-        t0 = time.perf_counter()
+        # POST to /adapters/load
         client = await self._get_client()
         response = await client.post(
             f"{self.base_url}/adapters/load",
             json={"weights": weights_b64, "version": version},
         )
         response.raise_for_status()
-        timings["http_post"] = time.perf_counter() - t0
+        result = response.json()
 
-        if verbose:
-            print(f"      [publish] http_post={timings['http_post']*1000:.1f}ms")
+        # Clean up intermediate data to free memory
+        del adapter_weights
+        del weights_np
+        del weight_bytes
+        del weights_b64
+        mx.clear_cache()
 
-        return response.json()
+        return result
 
     async def get_version(self) -> int:
         """

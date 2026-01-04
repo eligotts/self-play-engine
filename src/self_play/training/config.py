@@ -41,10 +41,15 @@ class TrainerConfig:
     # Pad token ID for collation (typically 0 or tokenizer.pad_token_id)
     pad_token_id: int = 0
 
-    # Logging verbosity
-    verbose: bool = False
-
     # Memory management: eval after each micro-batch to free memory
     # Set to True for memory-constrained systems (like MacBook)
     # Set to False for systems with lots of VRAM (batched eval is faster)
     eval_per_micro_batch: bool = True
+
+    # Wandb logging (set wandb_project to enable)
+    wandb_project: Optional[str] = None
+    wandb_run_name: Optional[str] = None
+
+    # Evaluation settings
+    eval_every: int = 10  # Run eval every N steps (0 = disabled)
+    eval_concurrency: int = 8  # Concurrency for eval rollouts

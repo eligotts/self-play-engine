@@ -1,19 +1,22 @@
 """
-Example: Training a debate agent with RL.
+Example: Training a proposer/solver agent with RL.
 
 This script demonstrates how to use the self-play training module to train
-a debate agent. It combines:
-- The DebateArena from the examples module (for generation)
+proposer and solver agents. It combines:
+- The ProposerSolverArena from the examples module (for generation)
 - The Trainer from the training module (for training)
 - An mlx-vllm server for inference (with LoRA hot-swap)
 
+The proposer learns to generate questions at an optimal difficulty level,
+while the solver learns to answer them correctly.
+
 To run this example:
 1. Start mlx-vllm server with LoRA enabled:
-   MLX_VLLM_LORA_RANK=8 MLX_VLLM_LORA_LAYERS=16 \\
+   MLX_VLLM_LORA_RANK=8 MLX_VLLM_LORA_LAYERS=16 \
    python -m uvicorn mlx_vllm.server:app --port 8000
 
 2. Run this script:
-   python examples/train_debate.py
+   python examples/train_proposer_solver.py
 """
 import asyncio
 import argparse
@@ -25,8 +28,8 @@ from mlx.utils import tree_flatten
 from mlx_lm import load
 from mlx_lm.tuner.utils import linear_to_lora_layers
 
-from self_play.core import OpenAIClient, Role, Artifact, GRPOCredit
-from self_play.examples.debate import DebateArena, DebateEpisode
+from self_play.core import OpenAIClient, Role, Artifact
+from self_play.examples.proposer_solver import ProposerSolverArena, ProposerEpisode, SolveEpisode
 from self_play.training import (
     Trainer,
     TrainerConfig,
@@ -75,30 +78,18 @@ def load_model_with_lora(
 
 
 async def main(args):
-    # Topics for debate training
-    topics = [
-        "Social media does more harm than good to society",
-        "Artificial intelligence will create more jobs than it destroys",
-        "Climate change is the most pressing issue of our time",
-        "Universal basic income should be implemented globally",
-        "Space exploration is a worthwhile investment for humanity",
-        "Remote work is better than office work",
-        "Nuclear energy is the solution to climate change",
-        "Cryptocurrencies will replace traditional currencies",
-        "Genetic engineering of humans should be allowed",
-        "Autonomous vehicles should replace human drivers",
-        "Free speech should have no legal limits",
-        "Democracy is the best form of government",
-        "Zoos do more harm than good to animal conservation",
-        "College education is no longer worth the cost",
-        "The death penalty should be abolished worldwide",
-        "Billionaires should not exist in a just society",
-        "Animal testing for medical research is ethically justified",
-        "Voting should be mandatory for all citizens",
-        "Privacy is more important than national security",
-        "Art created by AI should not be considered real art",
-        "Professional athletes are overpaid relative to their social value",
-        "Childhood social media use should be heavily restricted by law",
+    # Seed questions for the proposer to learn from
+    initial_questions = [
+        {"question": "What is 15 + 27? Answer as a number.", "ground_truth": "42"},
+        {"question": "If x + 5 = 12, what is x? Answer as just the number.", "ground_truth": "7"},
+        {"question": "What is 8 * 5? Answer as a number.", "ground_truth": "40"},
+        {"question": "What is 144 / 12? Answer as a number.", "ground_truth": "12"},
+        {"question": "What is 2^8? Answer as a number.", "ground_truth": "256"},
+        {"question": "If 3x = 21, what is x? Answer as just the number.", "ground_truth": "7"},
+        {"question": "What is the sum of 13, 17, and 22? Answer as a number.", "ground_truth": "52"},
+        {"question": "What is 7! / 6!? Answer as a number.", "ground_truth": "7"},
+        {"question": "If a rectangle has length 8 and width 5, what is its area? Answer as a number.", "ground_truth": "40"},
+        {"question": "What is the square root of 169? Answer as a number.", "ground_truth": "13"},
     ]
 
     # Setup inference server URL
@@ -106,7 +97,6 @@ async def main(args):
     print(f"\nConnecting to inference server at {base_url}...")
 
     # Setup inference client
-    # If a full URL is provided, we need to handle it differently than the host/port style
     if args.url:
         client = OpenAIClient(
             api_key="not-needed",
@@ -118,41 +108,36 @@ async def main(args):
         client = OpenAIClient.for_local(host=args.host, port=args.port, timeout=120.0)
 
     # Setup arena
-    print("Setting up debate arena...")
-    arena = DebateArena(
-        client=client,
-        batch_size=args.batch_size,
-        verbose=args.verbose,
-        credit_assigner=GRPOCredit(),
-    )
+    print("Setting up proposer/solver arena...")
+    arena = ProposerSolverArena(client=client, batch_size=args.batch_size, verbose=args.verbose)
 
     # Add roles
     arena.add_role(Role(
-        id="Aff",
-        system_prompt="You are a skilled debater arguing for the AFFIRMATIVE side (supporting the proposition). "
-                      "Make clear, persuasive arguments supported by logic and evidence. Be concise. Each of your turns should be no more than 3 sentences.",
-        temperature=0.8,
+        id="Proposer",
+        system_prompt="You are a creative math problem creator. "
+                      "Generate interesting, well-formed problems with clear answers."
+                      "Ensure that in your question you explicitly state the form the answer should be provided in.",
+        temperature=0.9,
         max_tokens=1024,
     ))
 
     arena.add_role(Role(
-        id="Neg",
-        system_prompt="You are a skilled debater arguing for the NEGATIVE side (opposing the proposition). "
-                      "Make clear, persuasive arguments supported by logic and evidence. Be concise. Each of your turns should be no more than 3 sentences.",
-        temperature=0.8,
+        id="Solver",
+        system_prompt="You are a skilled math problem solver. "
+                      "Think step by step and provide clear, correct answers."
+                      "Ensure that your answer is provided in the form specified in the question.",
+        temperature=0.7,
         max_tokens=1024,
     ))
 
-    # Add episode
-    arena.add_episode("debate", DebateEpisode(num_rounds=3))
+    # Add episodes
+    arena.add_episode("propose", ProposerEpisode(n_solver_rollouts=args.n_solver_rollouts))
+    arena.add_episode("solve", SolveEpisode())
 
-    # Add topics to store
-    topic_store = arena.add_store("topics")
-    for topic in topics:
-        topic_store.add(Artifact(
-            id=f"topic_{hash(topic) % 10000}",
-            data={"topic": topic},
-        ))
+    # Add initial questions to store
+    question_store = arena.add_store("questions")
+    for i, q in enumerate(initial_questions):
+        question_store.add(Artifact(id=f"seed_{i}", data=q))
 
     # Load model with LoRA
     model, tokenizer = load_model_with_lora(
@@ -193,8 +178,9 @@ async def main(args):
     )
 
     print(f"\nStarting training for {args.num_steps} steps...")
-    print(f"  - Batch size: {args.batch_size} debates per arena step")
+    print(f"  - Batch size: {args.batch_size} episodes per arena step")
     print(f"  - Train batch size: {args.train_batch_size} records per train step")
+    print(f"  - Solver rollouts per proposal: {args.n_solver_rollouts}")
     print(f"  - Micro token budget: {args.micro_token_budget}")
     print(f"  - Max policy lag: {args.max_policy_lag}")
     print(f"  - Importance sampling: {args.use_importance_sampling}")
@@ -229,14 +215,13 @@ async def main(args):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Train a debate agent with RL")
+    parser = argparse.ArgumentParser(description="Train proposer/solver agents with RL")
 
     # Model args
     parser.add_argument(
         "--model-path",
         type=str,
         default="/Users/eligottlieb/.lmstudio/models/lmstudio-community/Qwen3-1.7B-MLX-8bit",
-        # default="/Users/eligottlieb/.lmstudio/models/mlx-community/Trinity-Nano-Preview-8bit",
         help="Path to the base model",
     )
     parser.add_argument("--lora-rank", type=int, default=8, help="LoRA rank")
@@ -250,8 +235,9 @@ if __name__ == "__main__":
     # Training args
     parser.add_argument("--num-steps", type=int, default=10, help="Number of training steps")
     parser.add_argument("--lr", type=float, default=1e-5, help="Learning rate")
-    parser.add_argument("--batch-size", type=int, default=4, help="Debates per arena step")
+    parser.add_argument("--batch-size", type=int, default=4, help="Episodes per arena step")
     parser.add_argument("--train-batch-size", type=int, default=24, help="Records per train step")
+    parser.add_argument("--n-solver-rollouts", type=int, default=4, help="Solver rollouts per proposal")
     parser.add_argument("--micro-token-budget", type=int, default=4096, help="Tokens per micro-batch")
     parser.add_argument("--max-policy-lag", type=int, default=3, help="Max staleness (steps)")
     parser.add_argument("--concurrency", type=int, default=4, help="Max concurrent episodes")

@@ -1,29 +1,85 @@
 """
-Inference clients for real API endpoints.
+Inference clients for model API endpoints.
 
+InferenceClient: Abstract base class for all inference clients.
+MockInferenceClient: Mock client for testing.
 OpenAIClient: OpenAI-compatible client for OpenAI, OpenRouter, and local servers.
-Handles missing logprobs gracefully (common with hosted APIs).
 """
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
-from typing import Any, Dict, List, Optional
+from abc import ABC, abstractmethod
+from typing import Any, Callable, Dict, List, Optional
 
 import httpx
 
-from .arena import InferenceClient, ModelResponse
-from .types import Messages
+from .types import Messages, ModelResponse
 
 
-@dataclass
-class OpenAIConfig:
-    """Configuration for OpenAI-compatible API."""
-    api_key: str
-    model: str = "openai/gpt-4o-mini"
-    base_url: str = "https://openrouter.ai/api/v1"
-    timeout: float = 60.0
+# ---------------------------------------------------------------------------
+# Abstract Base Class
+# ---------------------------------------------------------------------------
 
+class InferenceClient(ABC):
+    """Abstract interface for model inference."""
+
+    @abstractmethod
+    async def complete(
+        self,
+        messages: Messages,
+        temperature: float = 1.0,
+        max_tokens: Optional[int] = None,
+        return_tokens: bool = True,
+    ) -> ModelResponse:
+        ...
+
+    async def get_policy_version(self) -> int:
+        """
+        Get the current policy version from the inference server.
+
+        Returns 0 if the server doesn't support versioning (e.g., OpenRouter, OpenAI).
+        Override in subclasses that support LoRA hot-swap or similar.
+        """
+        return 0
+
+
+# ---------------------------------------------------------------------------
+# Mock Client (for testing)
+# ---------------------------------------------------------------------------
+
+class MockInferenceClient(InferenceClient):
+    """Mock client for testing."""
+
+    def __init__(self, response_fn: Optional[Callable[[Messages], str]] = None):
+        self.response_fn = response_fn or (lambda _: "Mock response")
+        self._call_count = 0
+
+    async def complete(
+        self,
+        messages: Messages,
+        temperature: float = 1.0,
+        max_tokens: Optional[int] = None,
+        return_tokens: bool = True,
+    ) -> ModelResponse:
+        self._call_count += 1
+        text = self.response_fn(messages)
+
+        fake_prompt_ids = list(range(10))
+        fake_completion_ids = list(range(len(text.split())))
+        fake_logprobs = [-0.5] * len(fake_completion_ids)
+
+        return ModelResponse(
+            text=text,
+            completion=[{"role": "assistant", "content": text}],
+            prompt_token_ids=fake_prompt_ids if return_tokens else None,
+            completion_token_ids=fake_completion_ids if return_tokens else None,
+            completion_logprobs=fake_logprobs if return_tokens else None,
+        )
+
+
+# ---------------------------------------------------------------------------
+# OpenAI-Compatible Client
+# ---------------------------------------------------------------------------
 
 class OpenAIClient(InferenceClient):
     """

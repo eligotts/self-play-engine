@@ -1,104 +1,38 @@
 """
 Arena: Orchestration engine for self-play training.
 
-    The Arena orchestrates the training loop:
+The Arena orchestrates the training loop:
 1. get_batch() - Define what episodes to run
 2. generate_rollouts() - Execute episodes in parallel
 3. build_training_batch() - Convert to trainer-consumable format
 
 Episode state is transient (within one episode).
 Arena state persists across the entire training run.
-    Rewards are computed by each episode's Rubric during generation.
-    """
+Rewards are computed by each episode's Rubric during generation.
+"""
 from __future__ import annotations
 
 import asyncio
-from abc import ABC, abstractmethod
-from dataclasses import dataclass
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
-from .types import Messages, Role, TrainingRecord
-from .episode import Episode, GenerateResult
+from .types import (
+    Artifact,
+    EpisodeRequest,
+    GenerateResult,
+    Messages,
+    ModelResponse,
+    Role,
+    TrainingBatch,
+    TrainingRecord,
+)
+from .episode import Episode
 from .credit import CreditAssigner, apply_credit
-
-
-# ---------------------------------------------------------------------------
-# Inference
-# ---------------------------------------------------------------------------
-
-@dataclass
-class ModelResponse:
-    """Response from a model call."""
-    text: str
-    completion: Messages
-
-    prompt_token_ids: Optional[List[int]] = None
-    completion_token_ids: Optional[List[int]] = None
-    completion_logprobs: Optional[List[float]] = None
-
-
-class InferenceClient(ABC):
-    """Abstract interface for model inference."""
-
-    @abstractmethod
-    async def complete(
-        self,
-        messages: Messages,
-        temperature: float = 1.0,
-        max_tokens: Optional[int] = None,
-        return_tokens: bool = True,
-    ) -> ModelResponse:
-        ...
-
-    async def get_policy_version(self) -> int:
-        """
-        Get the current policy version from the inference server.
-
-        Returns 0 if the server doesn't support versioning (e.g., OpenRouter, OpenAI).
-        Override in subclasses that support LoRA hot-swap or similar.
-        """
-        return 0
-
-
-class MockInferenceClient(InferenceClient):
-    """Mock client for testing."""
-
-    def __init__(self, response_fn: Optional[Callable[[Messages], str]] = None):
-        self.response_fn = response_fn or (lambda _: "Mock response")
-        self._call_count = 0
-
-    async def complete(
-        self,
-        messages: Messages,
-        temperature: float = 1.0,
-        max_tokens: Optional[int] = None,
-        return_tokens: bool = True,
-    ) -> ModelResponse:
-        self._call_count += 1
-        text = self.response_fn(messages)
-
-        fake_prompt_ids = list(range(10))
-        fake_completion_ids = list(range(len(text.split())))
-        fake_logprobs = [-0.5] * len(fake_completion_ids)
-
-        return ModelResponse(
-            text=text,
-            completion=[{"role": "assistant", "content": text}],
-            prompt_token_ids=fake_prompt_ids if return_tokens else None,
-            completion_token_ids=fake_completion_ids if return_tokens else None,
-            completion_logprobs=fake_logprobs if return_tokens else None,
-        )
+from .clients import InferenceClient
 
 
 # ---------------------------------------------------------------------------
 # Artifact Store
 # ---------------------------------------------------------------------------
-
-@dataclass
-class Artifact:
-    """An item in an artifact store."""
-    id: str
-    data: Dict[str, Any]
 
 class ArtifactStore:
     """Simple in-memory artifact store with weighted sampling."""
@@ -138,34 +72,6 @@ class ArtifactStore:
 
 
 # ---------------------------------------------------------------------------
-# Batch Request
-# ---------------------------------------------------------------------------
-
-@dataclass
-class EpisodeRequest:
-    """Request to run an episode with a resolved artifact payload."""
-    episode_type: str
-    artifact: Any
-    meta: Dict[str, Any] = None
-    is_trainable: bool = True
-
-    def __post_init__(self):
-        if self.meta is None:
-            self.meta = {}
-
-
-# ---------------------------------------------------------------------------
-# Training Batch
-# ---------------------------------------------------------------------------
-
-@dataclass
-class TrainingBatch:
-    """Batch of training records ready for the trainer."""
-    records: List[TrainingRecord]
-    meta: Dict[str, Any]
-
-
-# ---------------------------------------------------------------------------
 # Arena
 # ---------------------------------------------------------------------------
 
@@ -191,7 +97,6 @@ class Arena:
         self.client = client
         self.credit_assigner = credit_assigner
         self.verbose = verbose
-        self._call_counter = 0
 
         # Registries
         self.roles: Dict[str, Role] = {}
@@ -232,52 +137,21 @@ class Arena:
         If role_id is provided, uses the role's config (and returns tokens for training).
         Otherwise, uses explicit parameters.
         """
-        self._call_counter += 1
-        call_id = self._call_counter
-        caller = role_id if role_id else "judge"
-
-        try:
-            if role_id is not None:
-                role = self.roles[role_id]
-                response = await self.client.complete(
-                    messages=messages,
-                    temperature=temperature if temperature is not None else role.temperature,
-                    max_tokens=max_tokens if max_tokens is not None else role.max_tokens,
-                    return_tokens=True,
-                )
-            else:
-                response = await self.client.complete(
-                    messages=messages,
-                    temperature=temperature if temperature is not None else 1.0,
-                    max_tokens=max_tokens,
-                    return_tokens=return_tokens if return_tokens is not None else False,
-                )
-
-            # Print all output atomically after response to avoid race conditions
-            if self.verbose:
-                lines = [f"\n    [call #{call_id}] {caller}"]
-                for msg in messages:
-                    msg_role = msg.get("role", "?")
-                    content = msg.get("content", "")
-                    # Truncate to short snippet
-                    snippet = content[:80].replace("\n", " ")
-                    if len(content) > 80:
-                        snippet += "..."
-                    lines.append(f"      [{msg_role}] {snippet}")
-                # Truncate response to short snippet
-                resp_text = response.text if response.text else "(empty)"
-                resp_snippet = resp_text[:120].replace("\n", " ")
-                if len(resp_text) > 120:
-                    resp_snippet += "..."
-                lines.append(f"      [response] {resp_snippet}")
-                print("\n".join(lines))
-
-            return response
-
-        except Exception as e:
-            if self.verbose:
-                print(f"\n    [call #{call_id}] {caller}\n      [ERROR] {type(e).__name__}: {e}")
-            raise
+        if role_id is not None:
+            role = self.roles[role_id]
+            return await self.client.complete(
+                messages=messages,
+                temperature=temperature if temperature is not None else role.temperature,
+                max_tokens=max_tokens if max_tokens is not None else role.max_tokens,
+                return_tokens=True,
+            )
+        else:
+            return await self.client.complete(
+                messages=messages,
+                temperature=temperature if temperature is not None else 1.0,
+                max_tokens=max_tokens,
+                return_tokens=return_tokens if return_tokens is not None else False,
+            )
 
     # ---------------------------------------------------------------------------
     # Batch Definition (override for custom scheduling)
@@ -351,11 +225,7 @@ class Arena:
     # Training Batch Construction
     # ---------------------------------------------------------------------------
 
-    def build_training_batch(
-        self,
-        results: List[GenerateResult],
-        verbose: bool = False,
-    ) -> TrainingBatch:
+    def build_training_batch(self, results: List[GenerateResult]) -> TrainingBatch:
         """
         Convert rollouts into trainer-consumable batch.
 
@@ -363,11 +233,8 @@ class Arena:
         Each step's reward comes from step.reward (set by Rubric).
         """
         records: List[TrainingRecord] = []
-        skipped_steps = 0
 
         def process(result: GenerateResult) -> None:
-            nonlocal skipped_steps
-
             # Skip non-trainable results and their entire subtrees
             if not result.is_trainable:
                 return
@@ -376,9 +243,10 @@ class Arena:
 
             for step in rollout.steps:
                 if step.prompt_token_ids is None or step.completion_token_ids is None:
-                    skipped_steps += 1
-                    if verbose:
-                        print(f"    [build] skipping step {step.role_id}: no token IDs")
+                    continue
+
+                # Skip steps with zero advantage
+                if step.advantage == 0:
                     continue
 
                 action_mask = [0] * len(step.prompt_token_ids) + [1] * len(step.completion_token_ids)
@@ -411,162 +279,11 @@ class Arena:
 
         return TrainingBatch(records=records, meta=meta)
 
-    def sanity_check_batch(
-        self,
-        results: List[GenerateResult],
-        batch: TrainingBatch,
-        num_examples: int = 2,
-    ) -> None:
-        """
-        Validate that build_training_batch produced correct output.
-
-        Checks:
-        1. logprobs length == completion_token_ids length for each record
-        2. action_mask length == prompt_token_ids + completion_token_ids
-        3. action_mask has correct structure (0s then 1s)
-        4. Total records == total steps across all rollouts (minus skipped)
-
-        Prints a few example records for inspection.
-        """
-        print("\n" + "=" * 60)
-        print("SANITY CHECK: build_training_batch")
-        print("=" * 60)
-
-        # Count expected steps from results (only from trainable results)
-        def count_steps(result: GenerateResult) -> tuple[int, int]:
-            """Returns (total_steps, trainable_steps) for trainable results only."""
-            # Skip non-trainable results and their subtrees
-            if not result.is_trainable:
-                return 0, 0
-
-            total = 0
-            trainable = 0
-            for step in result.rollout.steps:
-                total += 1
-                if step.prompt_token_ids is not None and step.completion_token_ids is not None:
-                    trainable += 1
-            for child in result.children:
-                child_total, child_trainable = count_steps(child)
-                total += child_total
-                trainable += child_trainable
-            return total, trainable
-
-        total_steps = 0
-        trainable_steps = 0
-        for result in results:
-            t, tr = count_steps(result)
-            total_steps += t
-            trainable_steps += tr
-
-        print(f"\nRollout Summary:")
-        print(f"  Total results: {len(results)}")
-        print(f"  Total steps across all rollouts: {total_steps}")
-        print(f"  Trainable steps (have token IDs): {trainable_steps}")
-        print(f"  Skipped steps (no token IDs): {total_steps - trainable_steps}")
-        print(f"  TrainingRecords created: {len(batch.records)}")
-
-        # Check: records count matches trainable steps
-        if len(batch.records) == trainable_steps:
-            print(f"  ✓ Record count matches trainable step count")
-        else:
-            print(f"  ✗ MISMATCH: {len(batch.records)} records vs {trainable_steps} trainable steps")
-
-        # Show reward/advantage distribution by hierarchy level (only trainable results)
-        def collect_rewards(result: GenerateResult, level: int, data: list) -> None:
-            # Skip non-trainable results and their subtrees
-            if not result.is_trainable:
-                return
-
-            for step in result.rollout.steps:
-                data.append({
-                    "level": level,
-                    "episode_type": result.rollout.episode_type,
-                    "role_id": step.role_id,
-                    "reward": step.reward,
-                    "advantage": step.advantage,
-                })
-            for child in result.children:
-                collect_rewards(child, level + 1, data)
-
-        all_steps_data: list = []
-        for result in results:
-            collect_rewards(result, 0, all_steps_data)
-
-        print(f"\nReward/Advantage Distribution:")
-        # Group by (level, episode_type, role_id)
-        from collections import defaultdict
-        groups: dict = defaultdict(list)
-        for d in all_steps_data:
-            key = (d["level"], d["episode_type"], d["role_id"])
-            groups[key].append((d["reward"], d["advantage"]))
-
-        for (level, ep_type, role_id), values in sorted(groups.items()):
-            rewards = [v[0] for v in values]
-            advantages = [v[1] for v in values]
-            print(f"  Level {level} | {ep_type} | {role_id}: {len(values)} steps")
-            print(f"    rewards: {rewards}")
-            print(f"    advantages: {advantages}")
-
-        # Validate each record
-        errors = []
-        for i, record in enumerate(batch.records):
-            # Check logprobs length
-            if len(record.logprobs) != len(record.completion_token_ids):
-                errors.append(
-                    f"Record {i} ({record.role_id}): logprobs length {len(record.logprobs)} "
-                    f"!= completion_token_ids length {len(record.completion_token_ids)}"
-                )
-
-            # Check action_mask length
-            expected_mask_len = len(record.prompt_token_ids) + len(record.completion_token_ids)
-            if len(record.action_mask) != expected_mask_len:
-                errors.append(
-                    f"Record {i} ({record.role_id}): action_mask length {len(record.action_mask)} "
-                    f"!= expected {expected_mask_len}"
-                )
-
-            # Check action_mask structure (0s for prompt, 1s for completion)
-            prompt_len = len(record.prompt_token_ids)
-            completion_len = len(record.completion_token_ids)
-            expected_mask = [0] * prompt_len + [1] * completion_len
-            if record.action_mask != expected_mask:
-                errors.append(
-                    f"Record {i} ({record.role_id}): action_mask has incorrect structure"
-                )
-
-        if errors:
-            print(f"\n✗ ERRORS FOUND ({len(errors)}):")
-            for err in errors[:10]:  # Show first 10 errors
-                print(f"  - {err}")
-            if len(errors) > 10:
-                print(f"  ... and {len(errors) - 10} more")
-        else:
-            print(f"\n✓ All {len(batch.records)} records passed validation:")
-            print(f"  - logprobs length == completion_token_ids length")
-            print(f"  - action_mask length == total tokens")
-            print(f"  - action_mask structure correct (0s for prompt, 1s for completion)")
-
-        # Print example records
-        print(f"\n--- Example TrainingRecords (first {min(num_examples, len(batch.records))}) ---")
-        for i, record in enumerate(batch.records[:num_examples]):
-            print(f"\nRecord {i}:")
-            print(f"  role_id: {record.role_id}")
-            print(f"  rollout_id: {record.rollout_id[:8]}...")
-            print(f"  prompt_token_ids: {len(record.prompt_token_ids)} tokens")
-            print(f"  completion_token_ids: {len(record.completion_token_ids)} tokens")
-            print(f"  logprobs: {len(record.logprobs)} values (sum={sum(record.logprobs):.4f})")
-            print(f"  action_mask: {len(record.action_mask)} values ({sum(record.action_mask)} ones, {len(record.action_mask) - sum(record.action_mask)} zeros)")
-            print(f"  reward: {record.reward:.4f}")
-            print(f"  advantage: {record.advantage:.4f}")
-            print(f"  meta: {record.meta}")
-
-        print("\n" + "=" * 60)
-
     # ---------------------------------------------------------------------------
     # High-Level Training Step
     # ---------------------------------------------------------------------------
 
-    async def step(self, concurrency: int = 8, verbose: bool = False) -> TrainingBatch:
+    async def step(self, concurrency: int = 8) -> TrainingBatch:
         """
         Execute one training step:
         1. Get batch of episode requests
@@ -575,8 +292,6 @@ class Arena:
         4. Build training batch
         """
         requests = self.get_batch()
-        if verbose:
-            print(f"  [step] get_batch() returned {len(requests)} requests")
         if not requests:
             return TrainingBatch(records=[], meta={"num_results": 0, "num_records": 0})
 
@@ -584,28 +299,15 @@ class Arena:
         policy_version = await self.client.get_policy_version()
         for req in requests:
             req.meta["policy_version"] = policy_version
-        if verbose:
-            print(f"  [step] tagged requests with policy_version={policy_version}")
-
-        if verbose:
-            for i, req in enumerate(requests):
-                print(f"    [{i}] {req.episode_type}: {req.artifact}")
 
         results = await self.generate_rollouts(requests, concurrency=concurrency)
-        if verbose:
-            print(f"  [step] generate_rollouts() returned {len(results)} results")
-            for i, res in enumerate(results):
-                print(f"    [{i}] {res.rollout.episode_type}: {len(res.rollout.steps)} steps, rewards={res.rewards}")
 
         # Assign credit to steps
         if self.credit_assigner is not None:
             weights = self.credit_assigner.compute(results)
             apply_credit(results, weights)
 
-        batch = self.build_training_batch(results, verbose=verbose)
-        if verbose:
-            print(f"  [step] build_training_batch() returned {len(batch.records)} records")
-            self.sanity_check_batch(results, batch)
+        batch = self.build_training_batch(results)
         return batch
 
     # ---------------------------------------------------------------------------
@@ -616,7 +318,6 @@ class Arena:
         self,
         num_steps: Optional[int] = None,
         concurrency: int = 8,
-        verbose: bool = False,
     ):
         """
         Run training loop, yielding batches.
@@ -624,21 +325,14 @@ class Arena:
         Args:
             num_steps: Number of steps to run (None = until get_batch returns empty)
             concurrency: Max parallel episodes
-            verbose: Print debug info to terminal
         """
         step_count = 0
         while num_steps is None or step_count < num_steps:
-            if verbose:
-                print(f"\n[run] Starting step {step_count + 1}")
-            batch = await self.step(concurrency=concurrency, verbose=verbose)
+            batch = await self.step(concurrency=concurrency)
             if not batch.records:
-                if verbose:
-                    print(f"[run] No records in batch, stopping")
                 break
             yield batch
             step_count += 1
-        if verbose:
-            print(f"[run] Completed {step_count} steps")
 
     # ---------------------------------------------------------------------------
     # Lifecycle

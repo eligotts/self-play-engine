@@ -11,8 +11,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, TextIO
 
-from .types import Messages, Rollout, Step
-from .episode import GenerateResult
+from .types import GenerateResult, Messages, Rollout, Step
 
 
 class VerboseLogger:

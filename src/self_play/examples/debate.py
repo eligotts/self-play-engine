@@ -14,21 +14,26 @@ Debate Structure:
 from __future__ import annotations
 
 import json
+import os
 import random
 from typing import Any, Dict, List, Tuple
 
+from dotenv import load_dotenv
+from openai import AsyncOpenAI
+
+load_dotenv()
+
+
+
 from ..core import (
-    Role,
     Rollout,
     EpisodeState,
-    AlternatingRolesEpisode,
+    MultiTurnEpisode,
     Rubric,
     Arena,
     InferenceClient,
-    Artifact,
     EpisodeRequest,
     CreditAssigner,
-    GRPOCredit,
 )
 
 
@@ -36,12 +41,20 @@ from ..core import (
 # Rubric: LLM Judge (zero-sum)
 # ---------------------------------------------------------------------------
 
-def make_debate_rubric(aff_role: str, neg_role: str) -> Rubric:
+async def debate_judge(rollout: Rollout, arena: Arena) -> Dict[str, float]:
     """
-    Create a rubric that uses an LLM to judge the debate.
+    LLM judge for debate. Discovers actors dynamically from rollout.
 
     Returns zero-sum rewards: winner gets +score, loser gets -score.
     """
+    actors = rollout.actors
+
+    if not actors or len(actors) < 2:
+        return {actor: 0.0 for actor in actors}
+
+    # Build actor list for judge prompt (consistent ordering)
+    actor_list = sorted(actors)
+
     judge_prompt = f"""You are a JUDGE, not a debater. Your sole task is to evaluate the debate transcript below and output a JSON verdict.
 
 CRITICAL INSTRUCTIONS:
@@ -50,97 +63,97 @@ CRITICAL INSTRUCTIONS:
 - Do NOT write any text before or after the JSON
 - Output ONLY a single JSON object
 
-Evaluation criteria: quality of reasoning and how well each role directly responds to the details of the other role's argument. If they
-do not directly respond to the other role's argument, they lose.
+Evaluation criteria: YOUR SOLE EVALUATION CRITTERIA IS WHICH SIDE WAS KINDER IN THEIR RESPONSES TO THE OTHER SIDE'S ARGUMENTS.
+You should be looking for evidence of kindness in the responses, not the quality of the arguments. Responses that attack the other side's arguments without being kind lose.
 
 Required JSON format (output ONLY this, nothing else):
-{{"winner": "{aff_role}", "score": 0.7, "reasoning": "One sentence explaining why"}}
+{{"winner": "<one of the actors>", "score": 0.7, "reasoning": "One sentence explaining why"}}
 
 Rules:
-- "winner" must be exactly "{aff_role}" or "{neg_role}"
+- "winner" must be exactly one of: {', '.join(actor_list)}
 - "score" is winner's margin of victory from 0.5 (very close) to 1.0 (decisive)
 - Start your response with {{ and end with }}
 
 Example valid response:
-{{"winner": "{neg_role}", "score": 0.65, "reasoning": "{neg_role} provided stronger evidence and effectively rebutted {aff_role}'s main points."}}
+{{"winner": "{actor_list[1]}", "score": 0.65, "reasoning": "{actor_list[1]} provided stronger evidence and effectively rebutted {actor_list[0]}'s main points."}}
 
 Now evaluate the following debate transcript and respond with ONLY JSON: /no_think"""
 
-    async def llm_judge(rollout: Rollout, arena: Arena) -> Dict[str, float]:
-        if not rollout.steps:
-            return {aff_role: 0.0, neg_role: 0.0}
+    # The final step's prompt contains the full history (built by run_chat_loop)
+    # Extract it from the "user" message, then append the final completion
+    final_step = rollout.steps[-1]
 
-        # The final step's prompt contains the full history (built by run_chat_loop)
-        # Extract it from the "user" message, then append the final completion
-        final_step = rollout.steps[-1]
+    # Get history from final step's prompt (the user message content)
+    history = ""
+    for msg in final_step.prompt:
+        if msg.get("role") == "user":
+            history = msg.get("content", "")
+            break
 
-        # Get history from final step's prompt (the user message content)
-        history = ""
-        for msg in final_step.prompt:
-            if msg.get("role") == "user":
-                history = msg.get("content", "")
-                break
+    # Build full transcript: history + final completion
+    # History already has format "Topic: ...\n\n{role}: {text}\n\n{role}: {text}..."
+    transcript = history + f"\n\n{final_step.role_id}: {final_step.completion_text}"
 
-        # Build full transcript: history + final completion
-        # History already has format "Topic: ...\n\n{role}: {text}\n\n{role}: {text}..."
-        transcript = history + f"\n\n{final_step.role_id}: {final_step.completion_text}"
+    # Call Gemini judge via OpenRouter (not tracked for training)
+    openrouter_client = AsyncOpenAI(
+        base_url="https://openrouter.ai/api/v1",
+        api_key=os.environ.get("OPENROUTER_API_KEY", ""),
+    )
 
-        # Call LLM judge (not tracked for training - no role_id)
-        response = await arena.call_model(
-            messages=[
-                {"role": "system", "content": judge_prompt},
-                {"role": "user", "content": transcript},
-            ],
-            temperature=0.0,
-            max_tokens=500,
-        )
+    response = await openrouter_client.chat.completions.create(
+        model="google/gemini-3-flash-preview",
+        messages=[
+            {"role": "system", "content": judge_prompt},
+            {"role": "user", "content": transcript},
+        ],
+        temperature=0.0,
+        max_tokens=500,
+    )
 
-        # Parse judgment - handle markdown code fences
-        text = response.text.strip()
+    # Parse judgment - handle markdown code fences
+    text = (response.choices[0].message.content or "").strip()
 
-        # Strip markdown code fences if present
-        if text.startswith("```"):
-            lines = text.split("\n")
-            # Remove first line (```json) and last line (```)
-            lines = [l for l in lines if not l.strip().startswith("```")]
-            text = "\n".join(lines).strip()
+    # Strip markdown code fences if present
+    if text.startswith("```"):
+        lines = text.split("\n")
+        # Remove first line (```json) and last line (```)
+        lines = [l for l in lines if not l.strip().startswith("```")]
+        text = "\n".join(lines).strip()
 
-        # Try to extract JSON from the response
-        try:
-            # Find JSON object in text
-            if "{" in text:
-                start = text.index("{")
-                end = text.rindex("}") + 1
-                text = text[start:end]
+    # Try to extract JSON from the response
+    try:
+        # Find JSON object in text
+        if "{" in text:
+            start = text.index("{")
+            end = text.rindex("}") + 1
+            text = text[start:end]
 
-            data = json.loads(text)
-            winner = data.get("winner", "")
-            score = float(data.get("score", 0.5))
+        data = json.loads(text)
+        winner = data.get("winner", "")
+        score = float(data.get("score", 0.5))
 
-            if winner == aff_role:
-                return {aff_role: score, neg_role: -score}
-            elif winner == neg_role:
-                return {aff_role: -score, neg_role: score}
-            else:
-                if arena.verbose:
-                    print(f"      [judge] invalid winner '{winner}', expected {aff_role} or {neg_role}")
-        except (json.JSONDecodeError, ValueError) as e:
+        if winner in actors:
+            # Zero-sum: winner gets +score, all others get -score
+            return {actor: score if actor == winner else -score for actor in actors}
+        else:
             if arena.verbose:
-                preview = response.text[:100].replace('\n', ' ')
-                print(f"      [judge] JSON parse failed: {e}")
-                print(f"      [judge] response was: {preview}...")
+                print(f"      [judge] invalid winner '{winner}', expected one of {actors}")
+    except (json.JSONDecodeError, ValueError) as e:
+        if arena.verbose:
+            raw_text = response.choices[0].message.content or ""
+            preview = raw_text[:100].replace('\n', ' ')
+            print(f"      [judge] JSON parse failed: {e}")
+            print(f"      [judge] response was: {preview}...")
 
-        # Default: tie
-        return {aff_role: 0.0, neg_role: 0.0}
-
-    return Rubric(funcs=[llm_judge])
+    # Default: tie
+    return {actor: 0.0 for actor in actors}
 
 
 # ---------------------------------------------------------------------------
 # Debate Episode
 # ---------------------------------------------------------------------------
 
-class DebateEpisode(AlternatingRolesEpisode):
+class DebateEpisode(MultiTurnEpisode):
     """
     Multi-turn debate episode.
 
@@ -158,7 +171,7 @@ class DebateEpisode(AlternatingRolesEpisode):
         self.aff_role_id = aff_role_id
         self.neg_role_id = neg_role_id
         self.num_rounds = num_rounds
-        self._rubric = make_debate_rubric(aff_role_id, neg_role_id)
+        self._rubric = Rubric(funcs=[debate_judge])
 
     @property
     def episode_type(self) -> str:
@@ -168,9 +181,15 @@ class DebateEpisode(AlternatingRolesEpisode):
     def rubric(self) -> Rubric:
         return self._rubric
 
-    @property
-    def roles(self) -> Tuple[str, str]:
-        return (self.aff_role_id, self.neg_role_id)
+    def get_initial_actor(self, artifact: Any, state: EpisodeState) -> str:
+        start_idx = random.randint(0, 1)
+        state.data["start_idx"] = start_idx
+        return self.aff_role_id if start_idx == 0 else self.neg_role_id
+
+    def get_next_actor(self, state: EpisodeState, artifact: Any) -> str:
+        start_idx = state.data.get("start_idx", 0)
+        idx = (start_idx + state.turn) % 2
+        return self.aff_role_id if idx == 0 else self.neg_role_id
 
     def get_initial_prompt(
         self,
@@ -234,51 +253,3 @@ class DebateArena(Arena):
             )
             for topic in topics
         ]
-
-
-# ---------------------------------------------------------------------------
-# Factory
-# ---------------------------------------------------------------------------
-
-def create_debate_arena(
-    client: InferenceClient,
-    topics: List[str] | None = None,
-    num_rounds: int = 3,
-    batch_size: int = 4,
-    verbose: bool = False,
-) -> DebateArena:
-    """Create a complete debate arena."""
-    arena = DebateArena(
-        client,
-        batch_size=batch_size,
-        verbose=verbose,
-        credit_assigner=GRPOCredit(),
-    )
-
-    arena.add_role(Role(
-        id="Aff",
-        system_prompt="You are a skilled debater arguing for the AFFIRMATIVE side (supporting the proposition). "
-                      "Make clear, persuasive arguments supported by logic and evidence. Be concise. Each of your turns should be no more than 3 sentences.",
-        temperature=0.8,
-        max_tokens=1024,
-    ))
-
-    arena.add_role(Role(
-        id="Neg",
-        system_prompt="You are a skilled debater arguing for the NEGATIVE side (opposing the proposition). "
-                      "Make clear, persuasive arguments supported by logic and evidence. Be concise. Each of your turns should be no more than 3 sentences.",
-        temperature=0.8,
-        max_tokens=1024,
-    ))
-
-    arena.add_episode("debate", DebateEpisode(num_rounds=num_rounds))
-
-    topic_store = arena.add_store("topics")
-    if topics:
-        for topic in topics:
-            topic_store.add(Artifact(
-                id=f"topic_{hash(topic) % 10000}",
-                data={"topic": topic},
-            ))
-
-    return arena
