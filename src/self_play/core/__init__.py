@@ -56,8 +56,6 @@ from .arena import (
     Arena,
 )
 
-from .logging import VerboseLogger
-
 __all__ = [
     # Types
     "Message",
@@ -94,6 +92,4 @@ __all__ = [
     # Arena
     "ArtifactStore",
     "Arena",
-    # Logging
-    "VerboseLogger",
 ]

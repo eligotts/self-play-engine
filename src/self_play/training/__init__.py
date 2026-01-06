@@ -24,7 +24,6 @@ Example usage:
     config = TrainerConfig(
         micro_token_budget=4096,
         max_policy_lag=3,
-        use_importance_sampling=False,  # MLX inference = training
     )
     publisher = WeightPublisher(base_url="http://localhost:8000")
     trainer = Trainer(model, optimizer, config, publisher)

@@ -2,7 +2,7 @@
 Training configuration for the RL trainer.
 """
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Literal, Optional
 
 
 @dataclass
@@ -26,14 +26,32 @@ class TrainerConfig:
     # Minimum records needed before training (trainer waits for full batch)
     batch_size: int = 32
 
-    # Importance sampling toggle:
-    # - True: Forward pass to recompute logprobs, PPO-style clipped objective
-    # - False: Use inference logprobs directly (faster, for MLX inference=training)
-    use_importance_sampling: bool = True
-
     # PPO-style importance ratio clipping bounds
     clip_low: float = 0.8
     clip_high: float = 1.2
+
+    # Loss normalization: "token" (DAPO) or "sample" (GRPO)
+    # - "token": all tokens weighted equally across batch (recommended)
+    # - "sample": each sample weighted equally regardless of length
+    loss_type: Literal["token", "sample"] = "token"
+
+    # Importance sampling level: "token" or "sequence" (GSPO)
+    # - "token": per-token importance ratios (GRPO/DAPO style)
+    # - "sequence": sequence-level importance ratios (GSPO, recommended for stability)
+    importance_sampling: Literal["token", "sequence"] = "token"
+
+    # GSPO clip epsilon (only used when importance_sampling="sequence")
+    # GSPO uses much tighter clips than token-level PPO (paper uses ~3e-4)
+    # clip bounds become [1 - epsilon, 1 + epsilon]
+    gspo_clip_epsilon: float = 3e-4
+
+    # KL divergence penalty coefficient (prevents policy collapse)
+    # Higher values = stronger regularization toward reference policy
+    # Recommended: 0.05-0.2 for stable training
+    kl_coef: float = 0.1
+
+    # Whether to add KL penalty to the loss (set True to enable regularization)
+    use_kl_penalty: bool = False
 
     # Weight publishing: URL of mlx-vllm inference server
     weight_push_url: str = "http://localhost:8000"

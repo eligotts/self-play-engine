@@ -124,8 +124,17 @@ class Episode(ABC):
         return await arena.call_model(messages, role_id=role_id)
 
     # ---------------------------------------------------------------------------
-    # Extraction methods - override to customize
+    # Lifecycle methods - override to customize
     # ---------------------------------------------------------------------------
+
+    def startup(self, state: EpisodeState, artifact: Any) -> None:
+        """
+        Called at the beginning of generate() before rollout().
+
+        Override to initialize episode-specific state in state.data.
+        Default implementation does nothing.
+        """
+        pass
 
     def get_extras(self, state: EpisodeState) -> Dict[str, Any]:
         """Get episode-specific extras. Override to add custom data."""
@@ -145,10 +154,11 @@ class Episode(ABC):
         """
         Top-level entry point for episode execution.
 
-        1. Run rollout
-        2. Build Rollout with standard fields
-        3. Score with rubric (sets step.reward and rollout.reward)
-        4. Return GenerateResult with children
+        1. Create state and call startup()
+        2. Run rollout
+        3. Build Rollout with standard fields
+        4. Score with rubric (sets step.reward and rollout.reward)
+        5. Return GenerateResult with children
 
         Args:
             is_trainable: If False, this episode's steps won't be used for training.
@@ -156,7 +166,11 @@ class Episode(ABC):
         """
         import time
 
-        state = await self.rollout(arena, artifact)
+        # Create state and call startup for initialization
+        state = EpisodeState()
+        self.startup(state, artifact)
+
+        state = await self.rollout(arena, artifact, state)
 
         # Build rollout
         rollout = Rollout(
@@ -192,35 +206,62 @@ async def _run_chat_loop(
     env_response,
     is_done,
     get_next_actor,
+    get_observation=None,  # New: player-specific observation each turn
 ) -> EpisodeState:
     """
     Standard chat loop for turn-taking conversations.
 
-    Each model call receives: system prompt (from current actor's role) + single user message with full history.
-    System prompts are loaded dynamically based on the current actor.
-    History is built as a string, with env_response returning strings to append.
+    Each model call receives: system prompt + user message with observation and history.
+
+    Key concepts:
+    - System prompt: Static per-role instructions (from arena.roles)
+    - Initial prompt: Shared context at game start (from get_initial_prompt)
+    - Observation: Player-specific state, regenerated each turn (from get_observation)
+    - Transcript: Shared conversation log (player responses + action results)
+
+    The observation is NOT added to transcript - it's private to each player's turn.
+    This prevents leaking player-specific info (like personal values) to opponents.
     """
     state.current_actor = get_initial_actor(artifact, state)
 
-    # Get initial history from get_initial_prompt (system prompt is now loaded dynamically per actor)
-    history: str = get_initial_prompt(arena, artifact, state)
+    # Initial context (shared, shown once at start)
+    initial_context: str = get_initial_prompt(arena, artifact, state)
+
+    # Transcript: conversation log (shared between players)
+    # Only contains: player responses + action results from env_response
+    transcript: str = ""
 
     while not state.done:
         # Get system prompt dynamically from the current actor's role
         current_role = arena.roles.get(state.current_actor)
         system_prompt = current_role.system_prompt if current_role else None
 
-        # Build prompt: system + user with full history
+        # Build user message with three parts:
+        # 1. Observation (player-specific, fresh each turn, NOT in transcript)
+        # 2. Initial context (shared game setup)
+        # 3. Transcript (conversation so far)
+
+        user_parts = []
+
+        # 1. Player-specific observation (if provided)
+        obs = get_observation(state, arena, artifact) if get_observation else None
+        if obs:
+            user_parts.append(obs)
+
+        # 2. Initial context (on first turn, or always if no observation returned)
+        if state.turn == 0 or not obs:
+            if initial_context:
+                user_parts.append(initial_context)
+
+        # 3. Transcript (conversation history)
+        if transcript:
+            user_parts.append(f"Conversation so far:\n{transcript}")
+
+        user_string = "\n\n".join(user_parts)
+        # Build prompt
         prompt: Messages = []
         if system_prompt:
             prompt.append({"role": "system", "content": system_prompt})
-        user_string = ""
-        if state.turn > 0:
-            user_string = "Conversation history: \n\n" + history + "\n\nEnd of conversation history."
-        else:
-            user_string = history
-
-        user_string += "\n\n/no_think"
         prompt.append({"role": "user", "content": user_string})
 
         # Call model
@@ -237,18 +278,18 @@ async def _run_chat_loop(
         )
         state.trajectory.append(step)
 
-        # Add completion to history
-        history += f"\n\n{state.current_actor}: {step.completion_text}"
+        # Add player's response to transcript (this IS shared)
+        transcript += f"{state.current_actor}: {step.completion_text}\n\n"
 
         # Check done
         if is_done(state, artifact):
             state.done = True
             break
 
-        # Get env response (a string) and append to history
+        # Process action and get result string (shared info like "trade executed")
         env_str = await env_response(state, arena, artifact)
         if env_str:
-            history += f"\n\n{env_str}"
+            transcript += f"{env_str}\n\n"
 
         state.current_actor = get_next_actor(state, artifact)
 
@@ -265,12 +306,19 @@ class MultiTurnEpisode(Episode):
 
     Subclasses must implement:
     - get_initial_actor: which role starts
-    - get_initial_prompt: the initial history string
+    - get_initial_prompt: shared initial context string
 
     Subclasses may override:
-    - env_response: string to append between turns (default: "")
+    - get_observation: player-specific state, regenerated each turn (default: None)
+    - env_response: action result to append to transcript (default: "")
     - get_next_actor: which role goes next (default: same actor)
     - is_done: when to stop (default: check max_turns)
+
+    Prompt structure each turn:
+    - System: Role's system_prompt (static)
+    - User: [observation] + [initial_context on turn 0] + [transcript]
+
+    The observation is NOT added to transcript - it's private to each player.
     """
 
     def __init__(self, max_turns: int = -1):
@@ -287,8 +335,25 @@ class MultiTurnEpisode(Episode):
         artifact: Any,
         state: EpisodeState,
     ) -> str:
-        """Return the initial history string. System prompts are loaded dynamically per actor."""
+        """Return the shared initial context string (shown on turn 0)."""
         ...
+
+    def get_observation(
+        self,
+        state: EpisodeState,
+        arena: Arena,
+        artifact: Any,
+    ) -> Optional[str]:
+        """
+        Return player-specific observation for the current actor.
+
+        Override this for games with mutable state (like negotiation).
+        The observation is shown each turn but NOT added to the transcript,
+        preventing player-specific info from leaking to opponents.
+
+        Returns None by default (no per-turn observation).
+        """
+        return None
 
     async def env_response(
         self,
@@ -296,7 +361,15 @@ class MultiTurnEpisode(Episode):
         arena: Arena,
         artifact: Any,
     ) -> str:
-        """Return a string to append to the history for the next turn."""
+        """
+        Process action and return result string for transcript.
+
+        Called after each turn. The returned string IS added to the shared
+        transcript (both players see it). Use for action results like
+        "Trade executed" or "Offer denied".
+
+        Returns empty string by default.
+        """
         return ""
 
     def is_done(self, state: EpisodeState, artifact: Any) -> bool:
@@ -327,6 +400,7 @@ class MultiTurnEpisode(Episode):
             env_response=self.env_response,
             is_done=self.is_done,
             get_next_actor=self.get_next_actor,
+            get_observation=self.get_observation,
         )
 
 

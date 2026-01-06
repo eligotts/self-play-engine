@@ -1,6 +1,7 @@
 """OpenAI-compatible API routes."""
 
 import base64
+import math
 import time
 import uuid
 
@@ -76,11 +77,13 @@ async def chat_completions(
     if body.logprobs:
         token_logprobs = []
         for token_id, logprob in zip(result.tokens, result.logprobs):
+            # Safe JSON serialization: replace NaN with a very low logprob
+            safe_logprob = logprob if not math.isnan(logprob) else -100.0
             token_str = engine.tokenizer.decode([token_id])
             token_logprobs.append(
                 TokenLogprob(
                     token=token_str,
-                    logprob=logprob,
+                    logprob=safe_logprob,
                     bytes=list(token_str.encode("utf-8")),
                 )
             )

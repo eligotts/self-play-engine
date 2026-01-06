@@ -77,6 +77,93 @@ def load_model_with_lora(
     return model, tokenizer
 
 
+def truncate(text: str, max_len: int = 200) -> str:
+    return text[:max_len] + "..." if len(text) > max_len else text
+
+
+async def preview_proposer_solver(arena, concurrency: int = 4):
+    """Preview ProposerSolver arena output with task-specific metrics."""
+    print("\n=== ProposerSolver Preview ===\n")
+    batch = await arena.step(concurrency=concurrency)
+
+    if not batch.records:
+        print("No records generated.")
+        return
+
+    # Group by rollout
+    episodes = {}
+    for r in batch.records:
+        if r.rollout_id not in episodes:
+            episodes[r.rollout_id] = {"meta": r.meta, "records": []}
+        episodes[r.rollout_id]["records"].append(r)
+
+    print(f"Episodes: {len(episodes)} | Records: {len(batch.records)}\n")
+
+    # Track stats by episode type
+    propose_stats = {"rewards": [], "solve_rates": []}
+    solve_stats = {"correct": 0, "total": 0, "rewards": []}
+
+    for i, (rid, data) in enumerate(episodes.items(), 1):
+        meta = data["meta"]
+        episode_type = meta.get("episode_type", "?")
+        extras = meta.get("extras", {})
+        artifact = meta.get("artifact", {}) or {}
+
+        if episode_type == "propose":
+            # Proposer episode
+            question = extras.get("question", artifact.get("question", "N/A"))
+            ground_truth = extras.get("ground_truth", artifact.get("ground_truth", "N/A"))
+            solve_rate = extras.get("solve_rate", 0)
+            reward = data["records"][0].reward if data["records"] else 0
+
+            propose_stats["rewards"].append(reward)
+            propose_stats["solve_rates"].append(solve_rate)
+
+            print(f"[{i}] Propose | reward={reward:.2f} | solve_rate={solve_rate:.1%}")
+            print(f"    Q: {truncate(question, 80)}")
+            print(f"    Answer: {ground_truth}")
+
+            # Show solver attempts if available
+            solver_results = extras.get("solver_results", [])
+            if solver_results:
+                correct = sum(1 for r in solver_results if r.get("correct"))
+                print(f"    Solver attempts: {correct}/{len(solver_results)} correct")
+
+        elif episode_type == "solve":
+            # Solver episode
+            question = artifact.get("question", "N/A")
+            ground_truth = artifact.get("ground_truth", "N/A")
+            response = extras.get("response", "N/A")
+            extracted = extras.get("extracted_answer", "N/A")
+            is_correct = meta.get("correct", False)
+            reward = data["records"][0].reward if data["records"] else 0
+
+            solve_stats["total"] += 1
+            if is_correct:
+                solve_stats["correct"] += 1
+            solve_stats["rewards"].append(reward)
+
+            status = "CORRECT" if is_correct else "WRONG"
+            print(f"[{i}] Solve | {status} | reward={reward:.2f}")
+            print(f"    Q: {truncate(question, 80)}")
+            print(f"    Expected: {ground_truth} | Got: {extracted}")
+            print(f"    Response: {truncate(response, 100)}")
+
+        print()
+
+    # Summary stats
+    print("Summary:")
+    if propose_stats["rewards"]:
+        avg_reward = sum(propose_stats["rewards"]) / len(propose_stats["rewards"])
+        avg_solve_rate = sum(propose_stats["solve_rates"]) / len(propose_stats["solve_rates"])
+        print(f"  Proposer: {len(propose_stats['rewards'])} episodes, avg_reward={avg_reward:.3f}, avg_solve_rate={avg_solve_rate:.1%}")
+
+    if solve_stats["total"] > 0:
+        accuracy = solve_stats["correct"] / solve_stats["total"]
+        avg_reward = sum(solve_stats["rewards"]) / len(solve_stats["rewards"])
+        print(f"  Solver: {solve_stats['correct']}/{solve_stats['total']} correct ({accuracy:.1%}), avg_reward={avg_reward:.3f}")
+
+
 async def main(args):
     # Seed questions for the proposer to learn from
     initial_questions = [
@@ -139,6 +226,12 @@ async def main(args):
     for i, q in enumerate(initial_questions):
         question_store.add(Artifact(id=f"seed_{i}", data=q))
 
+    # Dry-run mode: preview arena performance without training
+    if args.dry_run:
+        await preview_proposer_solver(arena, concurrency=args.concurrency)
+        await client.close()
+        return
+
     # Load model with LoRA
     model, tokenizer = load_model_with_lora(
         model_path=args.model_path,
@@ -155,9 +248,10 @@ async def main(args):
         micro_token_budget=args.micro_token_budget,
         max_policy_lag=args.max_policy_lag,
         batch_size=args.train_batch_size,
-        use_importance_sampling=args.use_importance_sampling,
         clip_low=0.8,
         clip_high=1.2,
+        kl_coef=args.kl_coef,
+        use_kl_penalty=args.use_kl_penalty,
         weight_push_url=base_url,
         pad_token_id=tokenizer.pad_token_id or 0,
         wandb_project=args.wandb_project,
@@ -183,7 +277,6 @@ async def main(args):
     print(f"  - Solver rollouts per proposal: {args.n_solver_rollouts}")
     print(f"  - Micro token budget: {args.micro_token_budget}")
     print(f"  - Max policy lag: {args.max_policy_lag}")
-    print(f"  - Importance sampling: {args.use_importance_sampling}")
     print()
 
     if args.simple_loop:
@@ -193,6 +286,7 @@ async def main(args):
             trainer=trainer,
             num_steps=args.num_steps,
             concurrency=args.concurrency,
+            step_concurrency=args.step_concurrency,
             verbose=args.verbose,
         )
     else:
@@ -204,6 +298,7 @@ async def main(args):
             batch_queue=batch_queue,
             num_steps=args.num_steps,
             concurrency=args.concurrency,
+            step_concurrency=args.step_concurrency,
             verbose=args.verbose,
         )
 
@@ -240,19 +335,19 @@ if __name__ == "__main__":
     parser.add_argument("--n-solver-rollouts", type=int, default=4, help="Solver rollouts per proposal")
     parser.add_argument("--micro-token-budget", type=int, default=4096, help="Tokens per micro-batch")
     parser.add_argument("--max-policy-lag", type=int, default=3, help="Max staleness (steps)")
+    parser.add_argument("--kl-coef", type=float, default=0.1, help="KL penalty coefficient (0.05-0.2 recommended)")
+    parser.add_argument("--use-kl-penalty", action="store_true", help="Add KL penalty to loss")
     parser.add_argument("--concurrency", type=int, default=4, help="Max concurrent episodes")
+    parser.add_argument("--step-concurrency", type=int, default=1, help="Max concurrent arena.step() calls")
 
     # Mode args
-    parser.add_argument(
-        "--use-importance-sampling",
-        action="store_true",
-        help="Use importance sampling (slower but needed for off-policy)",
-    )
     parser.add_argument(
         "--simple-loop",
         action="store_true",
         help="Use simple sequential loop instead of async",
     )
+    parser.add_argument("--dry-run", action="store_true",
+        help="Run single arena step to preview performance (skips training)")
     parser.add_argument("--verbose", action="store_true", help="Print debug info")
 
     # Wandb args

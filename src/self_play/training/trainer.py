@@ -11,6 +11,7 @@ The Trainer orchestrates:
 from __future__ import annotations
 
 import asyncio
+import math
 import time
 from typing import Dict, List, Optional, Tuple
 
@@ -39,7 +40,7 @@ class Trainer:
     Example:
         model, tokenizer = load_model_with_lora(...)
         optimizer = mx.optimizers.Adam(learning_rate=1e-5)
-        config = TrainerConfig(use_importance_sampling=False)
+        config = TrainerConfig()
         publisher = WeightPublisher(base_url="http://localhost:8000")
 
         trainer = Trainer(model, optimizer, config, publisher)
@@ -71,10 +72,20 @@ class Trainer:
 
         # Create loss function for value_and_grad
         self._loss_fn = make_loss_fn(
-            use_importance_sampling=config.use_importance_sampling,
             clip_low=config.clip_low,
             clip_high=config.clip_high,
+            kl_coef=config.kl_coef,
+            use_kl_penalty=config.use_kl_penalty,
+            loss_type=config.loss_type,
+            importance_sampling=config.importance_sampling,
+            gspo_clip_epsilon=config.gspo_clip_epsilon,
         )
+
+        # GSPO requires sample-level weighting (not token-level) for gradient accumulation
+        if config.importance_sampling == "sequence":
+            self._effective_loss_type = "sample"
+        else:
+            self._effective_loss_type = config.loss_type
 
     def filter_stale_records(
         self,
@@ -132,6 +143,10 @@ class Trainer:
         total_tokens = 0
         total_records = len(fresh_records)
 
+        # For token-level weighting, compute total tokens upfront
+        if self._effective_loss_type == "token":
+            total_tokens_for_weight = sum(len(r.completion_token_ids) for r in fresh_records)
+
         # Track lazy losses/metrics for batched eval at the end
         micro_losses = []  # List of (loss, num_records)
         micro_metrics = []  # List of (metrics_dict, num_records)
@@ -159,8 +174,17 @@ class Trainer:
             if self.config.eval_per_micro_batch:
                 mx.eval(loss, metrics["clip_fraction"], metrics["kl"], grads)
 
-            # Accumulate gradients weighted by record proportion
-            weight = len(micro) / total_records
+            # Track metrics (compute before weighting for token-level mode)
+            micro_tokens = sum(len(r.completion_token_ids) for r in micro)
+
+            # Accumulate gradients with appropriate weighting
+            if self._effective_loss_type == "token":
+                # DAPO: weight by token count
+                weight = micro_tokens / total_tokens_for_weight
+            else:
+                # GRPO/GSPO: weight by sample count
+                weight = len(micro) / total_records
+
             if accumulated_grads is None:
                 accumulated_grads = tree_map(lambda g: g * weight, grads)
             else:
@@ -169,9 +193,6 @@ class Trainer:
                     accumulated_grads,
                     grads,
                 )
-
-            # Track metrics
-            micro_tokens = sum(len(r.completion_token_ids) for r in micro)
             micro_losses.append((loss, len(micro)))
             micro_metrics.append((metrics, len(micro)))
             total_tokens += micro_tokens
@@ -258,6 +279,12 @@ class Trainer:
             fresh_records,
         )
         metrics["stale_dropped"] = stale_count
+
+        # Check for divergence (NaN in loss or KL)
+        if math.isnan(metrics.get("loss", 0.0)) or math.isnan(metrics.get("kl", 0.0)):
+            print(f"\n[trainer] WARNING: NaN detected at step {new_step_idx}!")
+            print(f"  metrics: {metrics}")
+            print("  This usually means the learning rate is too high or the model has diverged.")
 
         # Push weights to inference server
         if self.publisher is not None:

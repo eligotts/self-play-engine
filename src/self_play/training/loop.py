@@ -318,6 +318,7 @@ async def simple_training_loop(
     trainer: Trainer,
     num_steps: int,
     concurrency: int = 8,
+    step_concurrency: int = 1,
     verbose: bool = False,
 ) -> None:
     """
@@ -331,6 +332,7 @@ async def simple_training_loop(
         trainer: Trainer instance for training
         num_steps: Number of training steps to run
         concurrency: Max concurrent episodes during generation
+        step_concurrency: Number of arena.step() calls to run in parallel
         verbose: Print debug info
     """
     # Initialize wandb if configured
@@ -349,37 +351,48 @@ async def simple_training_loop(
     for step in range(num_steps):
         # Generate until we have enough records
         while len(records_buffer) < trainer.config.batch_size:
-            try:
-                batch = await arena.step(concurrency=concurrency)
-            except Exception as e:
-                consecutive_errors += 1
-                print(f"[step {step}] error ({consecutive_errors}/{max_consecutive_errors}): {e}")
-                if consecutive_errors >= max_consecutive_errors:
-                    print(f"[step {step}] too many consecutive errors, aborting")
-                    return
-                continue
-
-            consecutive_errors = 0  # Reset on success
-
-            if not batch.records:
-                if verbose:
-                    print(f"[step {step}] no records from arena.step()")
-                continue
-
-            # Filter stale records
-            current_version = trainer.train_step_idx
-            max_lag = trainer.config.max_policy_lag
-
-            fresh = [
-                r for r in batch.records
-                if current_version - r.meta.get("policy_version", 0) <= max_lag
+            # Launch step_concurrency arena.step() calls in parallel
+            tasks = [
+                asyncio.create_task(arena.step(concurrency=concurrency))
+                for _ in range(step_concurrency)
             ]
-            records_buffer.extend(fresh)
 
-            if verbose:
-                stale = len(batch.records) - len(fresh)
-                print(f"[step {step}] generated {len(batch.records)} records "
-                      f"({len(fresh)} fresh, {stale} stale), "
+            # Wait for ALL to complete
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+
+            # Process results
+            round_records = 0
+            round_stale = 0
+            for result in results:
+                if isinstance(result, Exception):
+                    consecutive_errors += 1
+                    print(f"[step {step}] error ({consecutive_errors}/{max_consecutive_errors}): {result}")
+                    if consecutive_errors >= max_consecutive_errors:
+                        print(f"[step {step}] too many consecutive errors, aborting")
+                        return
+                    continue
+
+                consecutive_errors = 0  # Reset on success
+                batch = result
+
+                if not batch.records:
+                    continue
+
+                # Filter stale records
+                current_version = trainer.train_step_idx
+                max_lag = trainer.config.max_policy_lag
+
+                fresh = [
+                    r for r in batch.records
+                    if current_version - r.meta.get("policy_version", 0) <= max_lag
+                ]
+                records_buffer.extend(fresh)
+                round_records += len(fresh)
+                round_stale += len(batch.records) - len(fresh)
+
+            if verbose and round_records > 0:
+                print(f"[step {step}] generated {round_records + round_stale} records "
+                      f"({round_records} fresh, {round_stale} stale), "
                       f"buffer={len(records_buffer)}")
 
         # Take batch_size records and train

@@ -83,6 +83,18 @@ class Step:
             return self.completion[0].get("content", "")
         return ""
 
+    @property
+    def prompt_text(self) -> str:
+        """Format prompt messages as readable text."""
+        if not self.prompt:
+            return ""
+        parts = []
+        for msg in self.prompt:
+            role = msg.get("role", "unknown")
+            content = msg.get("content", "")
+            parts.append(f"[{role.upper()}]\n{content}")
+        return "\n\n".join(parts)
+
 
 @dataclass
 class Rollout:
@@ -140,6 +152,10 @@ class TrainingRecord:
     # Reward/advantage for this step
     reward: float  # Raw reward from rubric
     advantage: float = 0.0  # Credit-assigned weight (for training loss)
+
+    # Text for debugging/preview (not used in training)
+    prompt_text: str = ""
+    completion_text: str = ""
 
     # Metadata (for logging, not training)
     meta: Dict[str, Any] = field(default_factory=dict)

@@ -11,11 +11,11 @@ Core Concepts:
 
 Example Usage:
     from self_play import Arena, Role, MockInferenceClient
-    from self_play.tasks import DebateArena, DebateEpisode
+    from self_play.tasks import GSM8KArena, GSM8KEpisode
 
-    # Create arena with debate setup
-    arena = DebateArena(client=MockInferenceClient(), batch_size=4)
-    arena.add_episode("debate", DebateEpisode(num_rounds=3))
+    # Create arena with GSM8K setup
+    arena = GSM8KArena(client=MockInferenceClient(), batch_size=4)
+    arena.add_episode("gsm8k", GSM8KEpisode())
 
     # Run a training step
     batch = await arena.step()
@@ -57,8 +57,6 @@ from .core import (
     Arena,
     # Clients
     OpenAIClient,
-    # Logging
-    VerboseLogger,
 )
 
 __version__ = "0.1.0"
@@ -99,6 +97,4 @@ __all__ = [
     "Arena",
     # Clients
     "OpenAIClient",
-    # Logging
-    "VerboseLogger",
 ]

@@ -260,8 +260,12 @@ class Arena:
                     action_mask=action_mask,
                     reward=step.reward,
                     advantage=step.advantage,
+                    prompt_text=step.prompt_text,
+                    completion_text=step.completion_text,
                     meta={
                         "episode_type": rollout.episode_type,
+                        "artifact": rollout.artifact,
+                        "extras": rollout.extras,
                         **rollout.meta,
                     },
                 ))
@@ -309,30 +313,6 @@ class Arena:
 
         batch = self.build_training_batch(results)
         return batch
-
-    # ---------------------------------------------------------------------------
-    # Convenience: Run Loop
-    # ---------------------------------------------------------------------------
-
-    async def run(
-        self,
-        num_steps: Optional[int] = None,
-        concurrency: int = 8,
-    ):
-        """
-        Run training loop, yielding batches.
-
-        Args:
-            num_steps: Number of steps to run (None = until get_batch returns empty)
-            concurrency: Max parallel episodes
-        """
-        step_count = 0
-        while num_steps is None or step_count < num_steps:
-            batch = await self.step(concurrency=concurrency)
-            if not batch.records:
-                break
-            yield batch
-            step_count += 1
 
     # ---------------------------------------------------------------------------
     # Lifecycle
