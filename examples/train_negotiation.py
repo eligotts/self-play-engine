@@ -184,7 +184,29 @@ async def preview_negotiation(arena, concurrency: int = 4):
         trades = extras.get("trades", [])
         num_trades = len(trades) if trades else 0
 
-        print(f"[{i}] Winner: {winner} | Trades: {num_trades}")
+        # Compute game-level rewards based on outcome
+        invalid_player = extras.get("invalid_action")
+        if invalid_player:
+            game_rewards = {
+                invalid_player: -1.5,
+                ("Player1" if invalid_player == "Player0" else "Player0"): 0.5
+            }
+        elif winner == "Player0":
+            game_rewards = {"Player0": 1.0, "Player1": -1.0}
+        elif winner == "Player1":
+            game_rewards = {"Player0": -1.0, "Player1": 1.0}
+        else:
+            game_rewards = {"Player0": 0.0, "Player1": 0.0}
+
+        # Count turns per player
+        turn_counts = {"Player0": 0, "Player1": 0}
+        for rec in data["records"]:
+            if rec.role_id in turn_counts:
+                turn_counts[rec.role_id] += 1
+
+        rewards_str = ", ".join(f"{p}: {r:+.1f}" for p, r in sorted(game_rewards.items()))
+        turns_str = ", ".join(f"{p}: {c}" for p, c in sorted(turn_counts.items()))
+        print(f"[{i}] Winner: {winner} | Trades: {num_trades} | Rewards: {rewards_str} | Turns: {turns_str}")
 
         # Show value changes
         if value_changes:
@@ -385,7 +407,7 @@ if __name__ == "__main__":
     parser.add_argument("--port", type=int, default=8000, help="Inference server port")
 
     # Game args
-    parser.add_argument("--max-game-turns", type=int, default=10, help="Max turns per negotiation game")
+    parser.add_argument("--max-game-turns", type=int, default=6, help="Max turns per negotiation game")
 
     # Training args
     parser.add_argument("--num-steps", type=int, default=100, help="Number of training steps")

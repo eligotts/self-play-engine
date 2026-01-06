@@ -10,6 +10,33 @@ from mlx_lm.generate import BatchGenerator
 from mlx_lm.sample_utils import make_sampler
 
 
+def _patch_arrays_cache():
+    """Patch mlx_lm's ArraysCache to support batch extraction.
+
+    ArraysCache is used by state-space and conv-based models (LFM2, RWKV7, etc.)
+    but lacks the extract() method needed by BatchGenerator for managing
+    completed sequences in a batch.
+    """
+    from mlx_lm.models.cache import ArraysCache
+
+    if hasattr(ArraysCache, "extract"):
+        return  # Already patched or upstream added support
+
+    def extract(self, idx):
+        """Extract a single cache from the batch at the given index."""
+        new_cache = ArraysCache(size=len(self.cache))
+        new_cache.cache = [
+            c[idx : idx + 1] if c is not None else None for c in self.cache
+        ]
+        return new_cache
+
+    ArraysCache.extract = extract
+
+
+# Apply patch on module load
+_patch_arrays_cache()
+
+
 @dataclass
 class GenerationOutput:
     """Result of a completed generation request."""

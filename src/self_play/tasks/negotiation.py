@@ -48,9 +48,9 @@ PLAYER_VALUES = {
     "Player1": {"Wood": 15, "Gold": 5},   # Prefers Wood
 }
 
-# Rewards
+# Rewards (matching SPIRAL)
 REWARD_WIN = 1.0
-REWARD_LOSE = 0.0
+REWARD_LOSE = -1.0
 REWARD_DRAW = 0.0
 REWARD_INVALID = -1.5
 REWARD_OPPONENT_INVALID = 0.5
