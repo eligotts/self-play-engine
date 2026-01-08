@@ -4,9 +4,10 @@ RL loss computation for policy gradient training.
 Uses PPO-style clipped importance sampling:
 - Forward pass to recompute logprobs under current policy
 - PPO-style clipped objective with importance ratio
-- KL penalty to prevent policy collapse
+- KL penalty to prevent policy collapse (K1 advantage shaping)
 """
-from typing import Dict, Optional, Tuple
+from contextlib import contextmanager
+from typing import Dict, Tuple
 
 import mlx.core as mx
 import mlx.nn as nn
@@ -50,6 +51,61 @@ def get_per_token_logps(
     return token_log_probs
 
 
+@contextmanager
+def disable_lora(model: nn.Module):
+    """
+    Context manager to temporarily disable LoRA contributions.
+
+    Sets all LoRA layer scales to 0, computes in eval mode, then restores.
+    This allows computing reference policy logprobs (base model without LoRA).
+    """
+    try:
+        from mlx_lm.tuner.lora import LoRALinear, LoRASwitchLinear, LoRAEmbedding
+
+        lora_classes = (LoRALinear, LoRASwitchLinear, LoRAEmbedding)
+    except ImportError:
+        # mlx_lm not installed or no LoRA classes available
+        lora_classes = ()
+
+    original_scales = {}
+    for name, module in model.named_modules():
+        if lora_classes and isinstance(module, lora_classes):
+            original_scales[name] = module.scale
+            module.scale = 0.0
+
+    was_training = model.training
+    model.eval()
+
+    try:
+        yield
+    finally:
+        for name, module in model.named_modules():
+            if name in original_scales:
+                module.scale = original_scales[name]
+        if was_training:
+            model.train()
+
+
+def get_ref_logprobs(model: nn.Module, input_ids: mx.array) -> mx.array:
+    """
+    Get log-probabilities from the base model with LoRA disabled.
+
+    Temporarily sets all LoRA scales to 0, computes logprobs, then restores.
+    Uses stop_gradient since we don't need gradients through reference policy.
+
+    Args:
+        model: The language model with LoRA attached
+        input_ids: Token IDs, shape (batch, seq_len)
+
+    Returns:
+        Reference log-probabilities, shape (batch, seq_len - 1)
+    """
+    with disable_lora(model):
+        ref_logprobs = mx.stop_gradient(get_per_token_logps(model, input_ids))
+        mx.eval(ref_logprobs)  # Materialize to free computation graph
+    return ref_logprobs
+
+
 def compute_loss(
     model: nn.Module,
     input_ids: mx.array,
@@ -63,11 +119,13 @@ def compute_loss(
     loss_type: str = "token",
     importance_sampling: str = "token",
     gspo_clip_epsilon: float = 3e-4,
+    kl_clip_max: float = 0.5,
+    clip_skip_threshold: float = 0.5,
 ) -> Tuple[mx.array, Dict[str, mx.array]]:
     """
     Compute the RL loss for policy gradient training.
 
-    Uses PPO-style clipped importance sampling with optional KL penalty.
+    Uses PPO-style clipped importance sampling with K1 KL advantage shaping.
 
     Args:
         model: The language model
@@ -80,16 +138,18 @@ def compute_loss(
             Will be sliced to (batch, seq_len - 1) internally.
         clip_low: Lower bound for importance ratio clipping (e.g., 0.8)
         clip_high: Upper bound for importance ratio clipping (e.g., 1.2)
-        kl_coef: KL divergence penalty coefficient (prevents policy collapse)
-        use_kl_penalty: Whether to add KL penalty to the loss
+        kl_coef: K1 KL shaping coefficient (subtracts from advantages)
+        use_kl_penalty: Whether to enable K1 KL advantage shaping
         loss_type: "token" (DAPO) or "sample" (GRPO) normalization
         importance_sampling: "token" (per-token ratios) or "sequence" (GSPO)
         gspo_clip_epsilon: Clip epsilon for GSPO (sequence mode uses 1 ± epsilon)
+        kl_clip_max: Maximum K1 value before clipping (prevents extreme shaping)
+        clip_skip_threshold: Skip batch if clip fraction exceeds this threshold
 
     Returns:
         Tuple of (loss, metrics_dict)
-        - loss: Scalar loss value
-        - metrics_dict: Dictionary with clip_fraction, kl, etc.
+        - loss: Scalar loss value (0 if batch skipped)
+        - metrics_dict: Dictionary with clip_fraction, kl, skip_batch, etc.
     """
     # Slice to (batch, seq_len - 1) to align with prediction semantics
     # collate() returns (batch, seq_len) but we need to match trainer_logprobs
@@ -102,6 +162,38 @@ def compute_loss(
 
     # Forward pass to get current policy log-probs
     trainer_logprobs = get_per_token_logps(model, input_ids)
+
+    # K1 KL shaping: compute KL divergence from reference policy (base model)
+    # and subtract from advantages to discourage policy drift
+    if use_kl_penalty:
+        # Get reference policy logprobs (base model, LoRA disabled)
+        ref_logprobs = get_ref_logprobs(model, input_ids)
+
+        # Per-token K1: log π_new(a) - log π_ref(a)
+        k1_t = trainer_logprobs - ref_logprobs  # (batch, seq_len-1)
+
+        # Length-normalized K1 (masked mean, not sum)
+        k1_seq = (k1_t * loss_mask).sum(axis=1) / mx.maximum(
+            loss_mask.sum(axis=1), 1.0
+        )  # (batch,)
+
+        # Clip K1 for stability (clip raw K1 first, then scale)
+        k1_seq_clipped = mx.clip(k1_seq, -kl_clip_max, kl_clip_max)
+
+        # Subtract from advantages: A' = A - kl_coef * stop_gradient(K1)
+        # Multiply by kl_coef AFTER clipping so kl_clip_max is interpretable as raw K1 bounds
+        k1_penalty = (
+            mx.expand_dims(mx.stop_gradient(k1_seq_clipped), axis=1) * kl_coef
+        )
+        adjusted_advantages = advantages - k1_penalty  # (batch, seq_len-1)
+
+        # Log K1 metrics
+        metrics["k1_seq_mean"] = k1_seq.mean()
+        metrics["k1_clipped_frac"] = (
+            (k1_seq < -kl_clip_max) | (k1_seq > kl_clip_max)
+        ).mean()
+    else:
+        adjusted_advantages = advantages
 
     # Compute log importance ratio (per-token)
     log_ratio = trainer_logprobs - inference_logprobs
@@ -129,12 +221,14 @@ def compute_loss(
         # Clip at sequence level
         si_clipped = mx.clip(si, effective_clip_low, effective_clip_high)  # (batch,)
 
-        # Collapse per-token advantages to sequence mean (Eq. 5 expects scalar per sequence)
-        seq_adv = (advantages * loss_mask).sum(axis=1) / mx.maximum(loss_mask.sum(axis=1), 1.0)
+        # Collapse per-token adjusted advantages to sequence mean (Eq. 5 expects scalar per sequence)
+        seq_adv = (adjusted_advantages * loss_mask).sum(axis=1) / mx.maximum(
+            loss_mask.sum(axis=1), 1.0
+        )
 
         # Track advantage variance as metric (don't eval inside loss - would cause sync)
         adv_mean = mx.expand_dims(seq_adv, axis=1)
-        adv_dev = (mx.abs((advantages - adv_mean) * loss_mask)).max()
+        adv_dev = (mx.abs((adjusted_advantages - adv_mean) * loss_mask)).max()
         metrics["adv_max_dev"] = adv_dev  # Logged outside grad path
 
         # PPO-style clipped objective at sequence level (scalar per sequence)
@@ -169,22 +263,36 @@ def compute_loss(
         # PPO-style clipped surrogate objective
         # We want to maximize: min(ratio * A, clip(ratio) * A)
         # So we minimize: -min(ratio * A, clip(ratio) * A)
-        unclipped_obj = importance_ratio * advantages
-        clipped_obj = clipped_ratio * advantages
+        unclipped_obj = importance_ratio * adjusted_advantages
+        clipped_obj = clipped_ratio * adjusted_advantages
 
         # Take the minimum (pessimistic bound)
         pg_loss = -mx.minimum(unclipped_obj, clipped_obj)
 
         # Compute clipping metrics (use effective bounds)
-        is_clipped = (importance_ratio < effective_clip_low) | (importance_ratio > effective_clip_high)
+        is_clipped = (importance_ratio < effective_clip_low) | (
+            importance_ratio > effective_clip_high
+        )
         clip_fraction = (is_clipped * loss_mask).sum() / mx.maximum(loss_mask.sum(), 1.0)
         metrics["clip_fraction"] = clip_fraction
 
-    # Approximate KL divergence: (r - 1) - log(r) ≈ 0.5 * (log_r)^2
-    # where r = importance_ratio
-    approx_kl = 0.5 * (log_ratio ** 2)
+    # Approximate KL divergence (K2): (r - 1) - log(r) ≈ 0.5 * (log_r)^2
+    # Kept for monitoring, not added to loss (K1 shaping is used instead when enabled)
+    approx_kl = 0.5 * (log_ratio**2)
     mean_kl = (approx_kl * loss_mask).sum() / mx.maximum(loss_mask.sum(), 1.0)
     metrics["kl"] = mean_kl
+
+    # Clip fraction gating: skip batch if too many tokens are clipped
+    # This indicates the policy has diverged too much from the reference
+    skip_batch = clip_fraction > clip_skip_threshold
+    metrics["skip_batch"] = skip_batch
+
+    if skip_batch:
+        # Zero loss means zero gradients (d/dx(0) = 0)
+        # Metrics still computed for monitoring
+        metrics["loss"] = mx.array(0.0)
+        metrics["pg_loss"] = mx.array(0.0)
+        return mx.array(0.0), metrics
 
     # Compute final loss scalar
     # Note: GSPO (sequence branch) already computed pg_loss_scalar directly above
@@ -197,21 +305,17 @@ def compute_loss(
             pg_loss_scalar = masked_loss.sum() / mx.maximum(loss_mask.sum(), 1.0)
         else:
             # GRPO: per-sample mean, then batch mean
-            per_sample_loss = masked_loss.sum(axis=1) / mx.maximum(loss_mask.sum(axis=1), 1.0)
+            per_sample_loss = masked_loss.sum(axis=1) / mx.maximum(
+                loss_mask.sum(axis=1), 1.0
+            )
             pg_loss_scalar = per_sample_loss.mean()
 
-    # Always compute the KL penalty for metrics (shows what it would be)
-    kl_penalty = kl_coef * mean_kl
-
-    # Optionally add KL penalty to the loss
-    if use_kl_penalty:
-        loss = pg_loss_scalar + kl_penalty
-    else:
-        loss = pg_loss_scalar
+    # Final loss is just the PG loss
+    # K1 KL shaping is applied to advantages (above), not added to loss
+    loss = pg_loss_scalar
 
     metrics["loss"] = loss
     metrics["pg_loss"] = pg_loss_scalar
-    metrics["kl_penalty"] = kl_penalty  # Always shows real value for monitoring
 
     return loss, metrics
 
@@ -224,6 +328,8 @@ def make_loss_fn(
     loss_type: str = "token",
     importance_sampling: str = "token",
     gspo_clip_epsilon: float = 3e-4,
+    kl_clip_max: float = 0.5,
+    clip_skip_threshold: float = 0.5,
 ):
     """
     Create a loss function suitable for use with nn.value_and_grad.
@@ -238,15 +344,18 @@ def make_loss_fn(
     Args:
         clip_low: Lower bound for importance ratio clipping
         clip_high: Upper bound for importance ratio clipping
-        kl_coef: KL divergence penalty coefficient (prevents policy collapse)
-        use_kl_penalty: Whether to add KL penalty to the loss
+        kl_coef: K1 KL shaping coefficient (subtracts from advantages)
+        use_kl_penalty: Whether to enable K1 KL advantage shaping
         loss_type: "token" (DAPO) or "sample" (GRPO) normalization
         importance_sampling: "token" (per-token ratios) or "sequence" (GSPO)
         gspo_clip_epsilon: Clip epsilon for GSPO (sequence mode uses 1 ± epsilon)
+        kl_clip_max: Maximum K1 value before clipping (prevents extreme shaping)
+        clip_skip_threshold: Skip batch if clip fraction exceeds this threshold
 
     Returns:
         A loss function compatible with nn.value_and_grad that returns (loss, metrics)
     """
+
     def loss_fn(
         model: nn.Module,
         input_ids: mx.array,
@@ -267,6 +376,8 @@ def make_loss_fn(
             loss_type=loss_type,
             importance_sampling=importance_sampling,
             gspo_clip_epsilon=gspo_clip_epsilon,
+            kl_clip_max=kl_clip_max,
+            clip_skip_threshold=clip_skip_threshold,
         )
         # Return (loss, metrics) - value_and_grad diffs w.r.t. loss, passes through metrics
         return loss, metrics

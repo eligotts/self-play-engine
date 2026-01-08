@@ -26,6 +26,7 @@ from self_play.training import (
     Trainer,
     TrainerConfig,
     WeightPublisher,
+    training_loop,
     simple_training_loop,
 )
 
@@ -236,13 +237,26 @@ async def main(args):
     print(f"  - Dynamic task generation ({args.proposer_batch_size} per batch)")
 
     try:
-        await simple_training_loop(
-            arena=arena,
-            trainer=trainer,
-            num_steps=args.num_steps,
-            concurrency=args.concurrency,
-            verbose=args.verbose,
-        )
+        if args.simple_loop:
+            await simple_training_loop(
+                arena=arena,
+                trainer=trainer,
+                num_steps=args.num_steps,
+                concurrency=args.concurrency,
+                step_concurrency=args.step_concurrency,
+                verbose=args.verbose,
+            )
+        else:
+            batch_queue = asyncio.Queue(maxsize=4)
+            await training_loop(
+                arena=arena,
+                trainer=trainer,
+                batch_queue=batch_queue,
+                num_steps=args.num_steps,
+                concurrency=args.concurrency,
+                step_concurrency=args.step_concurrency,
+                verbose=args.verbose,
+            )
     finally:
         await publisher.close()
         await client.close()
@@ -254,7 +268,8 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="RefineLoop: Generator-Critic iterative refinement")
     parser.add_argument("--model-path", 
         # default="/Users/eligottlieb/.lmstudio/models/lmstudio-community/Qwen3-1.7B-MLX-8bit",
-        default="/Users/eligottlieb/.lmstudio/models/lmstudio-community/Qwen2.5-1.5B-Instruct-MLX-8bit",
+        # default="/Users/eligottlieb/.lmstudio/models/lmstudio-community/Qwen2.5-1.5B-Instruct-MLX-8bit",
+        default="/Users/eligottlieb/.lmstudio/models/LiquidAI/LFM2.5-1.2B-Instruct-MLX-8bit",
     help="Path to the model to train on")
     parser.add_argument("--lora-rank", type=int, default=16)
     parser.add_argument("--lora-layers", type=int, default=16)
@@ -277,8 +292,11 @@ if __name__ == "__main__":
     parser.add_argument("--importance-sampling", type=str, default="token", choices=["token", "sequence"],
         help="Importance sampling level: 'token' (GRPO/DAPO) or 'sequence' (GSPO)")
     parser.add_argument("--concurrency", type=int, default=8)
+    parser.add_argument("--step-concurrency", type=int, default=1)
     parser.add_argument("--temperature", type=float, default=0.8)
     parser.add_argument("--max-tokens", type=int, default=512)
+    parser.add_argument("--simple-loop", action="store_true",
+        help="Use simple sequential loop instead of async")
     parser.add_argument("--dry-run", action="store_true",
         help="Run single arena step to preview performance (skips training)")
     parser.add_argument("--verbose", action="store_true")

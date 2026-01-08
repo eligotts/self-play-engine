@@ -267,7 +267,8 @@ if __name__ == "__main__":
     # Model
     parser.add_argument("--model-path", type=str,
         # default="/Users/eligottlieb/.lmstudio/models/lmstudio-community/Qwen3-1.7B-MLX-8bit")
-        default="/Users/eligottlieb/.lmstudio/models/mlx-community/Qwen3-0.6B-8bit")
+        # default="/Users/eligottlieb/.lmstudio/models/mlx-community/Qwen3-0.6B-8bit")
+        default="/Users/eligottlieb/.lmstudio/models/LiquidAI/LFM2.5-1.2B-Instruct-MLX-8bit")
     parser.add_argument("--lora-rank", type=int, default=16)
     parser.add_argument("--lora-layers", type=int, default=16)
 
@@ -281,22 +282,22 @@ if __name__ == "__main__":
     parser.add_argument("--max-samples", type=int, default=None)
 
     # Training
-    parser.add_argument("--num-steps", type=int, default=100)
+    parser.add_argument("--num-steps", type=int, default=200)
     parser.add_argument("--lr", type=float, default=1e-5)
     parser.add_argument("--batch-size", type=int, default=8)
-    parser.add_argument("--train-batch-size", type=int, default=12)
+    parser.add_argument("--train-batch-size", type=int, default=32)
     parser.add_argument("--micro-token-budget", type=int, default=2048)
     parser.add_argument("--max-policy-lag", type=int, default=3)
     parser.add_argument("--kl-coef", type=float, default=0.2)
     parser.add_argument("--use-kl-penalty", action="store_true")
     parser.add_argument("--concurrency", type=int, default=4)
-    parser.add_argument("--step-concurrency", type=int, default=1)
+    parser.add_argument("--step-concurrency", type=int, default=4)
 
     # Generation
     parser.add_argument("--system-prompt", default=None)
-    parser.add_argument("--prompt-template", default="{question} \n\n/no_think")
+    parser.add_argument("--prompt-template", default="{question}")
     parser.add_argument("--temperature", type=float, default=0.7)
-    parser.add_argument("--max-tokens", type=int, default=786)
+    parser.add_argument("--max-tokens", type=int, default=512)
 
     # Mode
     parser.add_argument("--simple-loop", action="store_true")

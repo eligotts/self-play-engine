@@ -79,6 +79,8 @@ class Trainer:
             loss_type=config.loss_type,
             importance_sampling=config.importance_sampling,
             gspo_clip_epsilon=config.gspo_clip_epsilon,
+            kl_clip_max=config.kl_clip_max,
+            clip_skip_threshold=config.clip_skip_threshold,
         )
 
         # GSPO requires sample-level weighting (not token-level) for gradient accumulation
@@ -142,6 +144,7 @@ class Trainer:
         accumulated_grads = None
         total_tokens = 0
         total_records = len(fresh_records)
+        skipped_micro_batches = 0
 
         # For token-level weighting, compute total tokens upfront
         if self._effective_loss_type == "token":
@@ -173,6 +176,10 @@ class Trainer:
             # For memory-constrained systems: eval immediately to free activations
             if self.config.eval_per_micro_batch:
                 mx.eval(loss, metrics["clip_fraction"], metrics["kl"], grads)
+
+            # Track skipped micro-batches (due to high clip fraction)
+            if metrics.get("skip_batch", mx.array(False)).item():
+                skipped_micro_batches += 1
 
             # Track metrics (compute before weighting for token-level mode)
             micro_tokens = sum(len(r.completion_token_ids) for r in micro)
@@ -224,6 +231,16 @@ class Trainer:
         total_clip_fraction = sum(float(m["clip_fraction"].item()) * n for m, n in micro_metrics)
         total_kl = sum(float(m["kl"].item()) * n for m, n in micro_metrics)
 
+        # Aggregate K1 metrics if present (only when use_kl_penalty=True)
+        total_k1_seq = 0.0
+        total_k1_clipped_frac = 0.0
+        has_k1_metrics = any("k1_seq_mean" in m for m, _ in micro_metrics)
+        if has_k1_metrics:
+            for m, n in micro_metrics:
+                if "k1_seq_mean" in m:
+                    total_k1_seq += float(m["k1_seq_mean"].item()) * n
+                    total_k1_clipped_frac += float(m["k1_clipped_frac"].item()) * n
+
         mx.clear_cache()
 
         # Increment step counter
@@ -237,7 +254,7 @@ class Trainer:
         avg_kl = total_kl / num_fresh
         avg_clip = total_clip_fraction / num_fresh
 
-        return {
+        result = {
             "loss": avg_loss,
             "tokens": total_tokens,
             "records": num_fresh,
@@ -245,7 +262,15 @@ class Trainer:
             "kl": avg_kl,
             "train_step": self.train_step_idx,
             "step_time_s": step_total,
-        }, self.train_step_idx
+            "skipped_micro_batches": skipped_micro_batches,
+        }
+
+        # Add K1 metrics if present
+        if has_k1_metrics:
+            result["k1_seq_mean"] = total_k1_seq / num_fresh
+            result["k1_clipped_frac"] = total_k1_clipped_frac / num_fresh
+
+        return result, self.train_step_idx
 
     async def train_step(self, batch: TrainingBatch) -> Dict[str, float]:
         """

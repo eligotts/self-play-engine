@@ -45,13 +45,26 @@ class TrainerConfig:
     # clip bounds become [1 - epsilon, 1 + epsilon]
     gspo_clip_epsilon: float = 3e-4
 
-    # KL divergence penalty coefficient (prevents policy collapse)
-    # Higher values = stronger regularization toward reference policy
+    # K1 KL shaping coefficient (subtracts from advantages to prevent policy drift)
+    # When use_kl_penalty=True, computes KL from base model (LoRA disabled)
+    # and subtracts kl_coef * K1_seq from advantages before computing loss
     # Recommended: 0.05-0.2 for stable training
     kl_coef: float = 0.1
 
-    # Whether to add KL penalty to the loss (set True to enable regularization)
+    # Whether to enable K1 KL advantage shaping (set True to enable)
+    # When enabled, computes reference policy logprobs (base model without LoRA)
+    # and subtracts kl_coef * K1_seq from advantages
     use_kl_penalty: bool = False
+
+    # Maximum K1 value before clipping (prevents extreme advantage shaping)
+    # Clips K1_seq to [-kl_clip_max, kl_clip_max] before applying kl_coef
+    # Typical K1 values: ±0.01 to ±0.1 early, up to ±0.3 later in training
+    kl_clip_max: float = 0.5
+
+    # Skip batch if clip fraction exceeds this threshold
+    # Prevents training on batches where policy has diverged too much
+    # Returns zero loss (zero gradients) when triggered
+    clip_skip_threshold: float = 0.5
 
     # Weight publishing: URL of mlx-vllm inference server
     weight_push_url: str = "http://localhost:8000"
