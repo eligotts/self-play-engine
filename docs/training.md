@@ -2,13 +2,11 @@
 
 This document covers the RL training infrastructure built on MLX for Apple Silicon. For self-play abstractions, see [concepts.md](concepts.md).
 
----
 
 ## The Core Idea
 
 Complete separation between how data is generated and how it's trained on. The trainer doesn't care where the data comes from - it just pulls samples and trains. The arena doesn't care how training works - it just generates rollouts.
 
----
 
 ## Architecture Overview
 
@@ -17,8 +15,6 @@ Complete separation between how data is generated and how it's trained on. The t
 - **Inference Server** serves the model with LoRA adapters that update in real-time
 
 Generation and training run concurrently - the arena doesn't wait for the trainer, and the trainer doesn't wait for the arena.
-
----
 
 ## Consumer-Producer Pattern
 
@@ -57,8 +53,6 @@ async def synchronous_training_loop(arena, trainer, num_steps):
 
 Simpler, easier to debug, but lower throughput.
 
----
-
 ## Micro-Batch Streaming
 
 We use **token-budget-based micro-batching** to control memory usage:
@@ -96,8 +90,6 @@ class Trainer:
             # Publish new weights to inference server
             await self.publish_weights()
 ```
-
----
 
 ## Loss Functions
 
@@ -187,8 +179,6 @@ if clip_fraction > clip_skip_threshold:  # Default: 0.3
 
 This prevents training on severely divergent samples. The trainer tracks skipped batches in metrics.
 
----
-
 ## Staleness Filtering
 
 Rollouts are tagged with their policy version at generation time:
@@ -208,8 +198,6 @@ def filter_fresh(records, current_version, staleness_limit=3):
         if current_version - r.meta["policy_version"] <= staleness_limit
     ]
 ```
-
----
 
 ## LoRA Hot-Swap
 
@@ -247,8 +235,6 @@ class AsyncEngine:
             # Process inference requests
             await self._generation_step()
 ```
-
----
 
 ## Inference Server
 
@@ -295,8 +281,6 @@ uv run legos serve \
     --model mlx-community/Qwen2.5-1.5B-Instruct-4bit \
     --port 8000
 ```
-
----
 
 ## Configuration
 
@@ -346,8 +330,6 @@ class TrainerConfig:
     wandb_project: Optional[str] = None
     wandb_run_name: Optional[str] = None
 ```
-
----
 
 ## Putting It Together
 

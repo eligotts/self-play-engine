@@ -4,13 +4,13 @@
 
 This project was borne out of my goal to build a library that 1) treats the patterns of LLM self-play as first class entities, and 2) uses the latest best practices in reinforcement learning training optimized for Apple Silicon using MLX.
 
-## The Self-Play Thesis
+**The Self-Play Thesis**
 
 As model capabilities increase, self-play becomes a viable method for improving model performance in certain domains. [Absolute Zero](https://arxiv.org/abs/2505.03335) (Zhao et al., 2025) showed this back in March 2025; [SPIRAL](https://arxiv.org/abs/2506.24119) (Liu et al., 2025) applied this concept to zero sum games; [SPICE](https://arxiv.org/abs/2510.24684) (Liu et al., 2025) added a creative external signal to drive training. See more thoughts of mine [here](https://eligottlieb1.substack.com/p/the-independent-pursuit-of-intelligence).
 
 When you look deeper at these various self-play setups, common patterns emerge. This project serves as a first attempt to capture those patterns, abstracting away the orchestration details and leaving only the experiment specifics to be implemented.
 
-## Why MLX?
+**Why MLX?**
 
 After passively riding the RL hype train this past year, which manifested in way too many hours of TPOT doomscrolling plus adding a few environments to [PI's Environments Hub](https://app.primeintellect.ai/dashboard/environments/ergotts/socratic-method), it felt like there was no better way to consolidate everything I'd been learning than just building a training library from scratch (whatever "from scratch" means these days). And why MLX? Feels like a growing community that is lacking an RL library like this, so maybe this could actually make an impact? Also, so I could finally make use of the somewhat rash decision to max out my macbook air memory.
 
@@ -28,8 +28,6 @@ uv run examples/train_gsm8k.py
 ```
 
 Weights update in real-time. Watch the model improve on math problems while answers become more concise.
-
----
 
 ## Self-Play Abstractions
 
@@ -120,7 +118,6 @@ How do we turn rewards into advantages? Built-in options:
 
 [See docs/concepts.md for the deep dive](docs/concepts.md)
 
----
 
 ## MLX Trainer
 
@@ -132,7 +129,7 @@ We implement [PipelineRL](https://arxiv.org/abs/2509.19128) (Piché et al., 2025
 
 ### Features
 
-Implemented best practices to consolidate my learnings (shoutout to [Nathan Lambert's deep dive on post-training](https://www.youtube.com/watch?v=uaZ3yRdYg8A&t=1584s)):
+Implemented best practices to consolidate my learnings (thank you Nathan Lambert for your [deep dive on post-training](https://www.youtube.com/watch?v=uaZ3yRdYg8A&t=1584s)):
 
 - **Zero gradient filtering**: Don't include samples with zero advantage ([`arena.py:239`](src/legos/core/arena.py#L239))
 - **Active sampling**: Continue to pull data until we have enough samples to step ([`trainer.py:404`](src/legos/training/trainer.py#L404))
@@ -143,8 +140,6 @@ Implemented best practices to consolidate my learnings (shoutout to [Nathan Lamb
 - **Stability safeguards**: Skip micro-batches where clip percentage is too high
 
 [See docs/training.md for details](docs/training.md)
-
----
 
 ## Examples
 
@@ -159,8 +154,6 @@ Implemented best practices to consolidate my learnings (shoutout to [Nathan Lamb
 
 [See docs/examples.md for walkthroughs](docs/examples.md)
 
----
-
 ## Installation
 
 ```bash
@@ -169,8 +162,6 @@ git clone https://github.com/eligottlieb/legos
 cd legos
 uv sync
 ```
-
----
 
 ## Project Structure
 
@@ -188,8 +179,6 @@ src/legos/
 └── inference/         # FastAPI server, continuous batching
 ```
 
----
-
 ## Acknowledgments
 
 This project would very much not be possible without other open source projects:
@@ -199,8 +188,6 @@ This project would very much not be possible without other open source projects:
 **[ludic](https://github.com/hallerite/ludic)** - From ludic I really took the clear separation between trainer and data generator. All the trainer should do is pull samples to train on, and shouldn't care how they were generated. Also took the idea of a credit assigner, which is a way to assign advantages to rollouts given a set of rewards.
 
 **[mlx-lm-lora](https://github.com/Goekdeniz-Guelmez/mlx-lm-lora)** - The core RL training code implemented in MLX.
-
----
 
 ## References
 

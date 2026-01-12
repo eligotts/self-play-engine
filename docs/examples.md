@@ -2,8 +2,6 @@
 
 This document walks through each built-in example, showing how the core abstractions compose to create different self-play setups.
 
----
-
 ## Two Main Patterns I've Identified
 
 **Pattern 1: Proposer/Solver** - Same model generates data then trains on it. A proposer generates a question, we get ground truth somehow, then get reward by using the model to solve that question and seeing how well it does.
@@ -14,8 +12,6 @@ Examples:
 - [Language Self-Play](https://arxiv.org/abs/2509.07414) - Data-free training
 
 **Pattern 2: Two-Player Games** - Same model plays against itself in a more game-like setting. Can be zero-sum games like [SPIRAL](https://arxiv.org/abs/2506.24119), head-to-head competition, or cooperative setups like a generator and critic working together to improve (refine loop).
-
----
 
 ## Negotiation: Two-Player Games
 
@@ -112,8 +108,6 @@ Player0 might have a structural advantage (first-mover). RAE maintains separate 
 ```bash
 uv run examples/train_negotiation.py
 ```
-
----
 
 ## Proposer/Solver: Nested Episodes
 
@@ -218,8 +212,6 @@ async def on_train_start(self):
 uv run examples/train_proposer_solver.py
 ```
 
----
-
 ## HeadToHead: Self-Play Tournaments
 
 **Pattern**: Same-model competition, LLM judging, zero-sum rewards
@@ -298,8 +290,6 @@ The ChallengeProposer is non-trainable - it just populates the challenge store.
 uv run examples/train_head_to_head.py
 ```
 
----
-
 ## RefineLoop: Cooperative Multi-Turn
 
 **Pattern**: Generator/Critic loop, cooperative rewards, external LLM judge
@@ -341,8 +331,6 @@ Why cooperative? The Critic's job is to help the Generator improve. If the Criti
 ```bash
 uv run examples/train_refine_loop.py
 ```
-
----
 
 ## SPICE: Corpus-Grounded Curriculum
 
@@ -422,8 +410,6 @@ More flexible than exact match - captures paraphrases and equivalent formulation
 uv run examples/train_spice.py
 ```
 
----
-
 ## GSM8K: Dataset-Based Training
 
 **Pattern**: Single actor, dataset-based, GRPO credit assignment
@@ -462,8 +448,6 @@ Simple exact-match against ground truth. The model learns to use the correct for
 ```bash
 uv run examples/train_gsm8k.py
 ```
-
----
 
 ## Creating Your Own
 
