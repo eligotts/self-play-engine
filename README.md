@@ -4,8 +4,6 @@
 
 This project was borne out of my goal to build a library that 1) treats the patterns of LLM self-play as first class entities, and 2) uses the latest best practices in reinforcement learning training optimized for Apple Silicon using MLX.
 
----
-
 ## The Self-Play Thesis
 
 As model capabilities increase, self-play becomes a viable method for improving model performance in certain domains. [Absolute Zero](https://arxiv.org/abs/2505.03335) (Zhao et al., 2025) showed this back in March 2025; [SPIRAL](https://arxiv.org/abs/2506.24119) (Liu et al., 2025) applied this concept to zero sum games; [SPICE](https://arxiv.org/abs/2510.24684) (Liu et al., 2025) added a creative external signal to drive training. See more thoughts of mine [here](https://eligottlieb1.substack.com/p/the-independent-pursuit-of-intelligence).
