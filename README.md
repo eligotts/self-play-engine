@@ -16,8 +16,6 @@ After passively riding the RL hype train this past year, which manifested in way
 
 And yes, LoRA only. Easy, simple, and all I really wanted to handle for now.
 
----
-
 ## Quick Start
 
 ```bash
