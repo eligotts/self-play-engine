@@ -10,10 +10,10 @@ The game:
 - Winner = player with larger inventory value change
 
 To run:
-1. Configure LoRA parameters in src/self_play/lora.py
+1. Configure LoRA parameters in src/legos/lora.py
 
 2. Start inference server:
-   self-play serve --model /path/to/model
+   legos serve --model /path/to/model
 
 3. Run training:
    uv run examples/train_negotiation.py
@@ -24,10 +24,10 @@ import argparse
 import mlx.optimizers as optim
 from mlx_lm import load
 
-from self_play.core import OpenAIClient, Actor, RAECredit
-from self_play.lora import apply_lora, print_trainable_params
-from self_play.tasks.negotiation import NegotiationArena, NegotiationEpisode
-from self_play.training import (
+from legos.core import OpenAIClient, Actor, RAECredit
+from legos.lora import apply_lora, print_trainable_params
+from legos.tasks.negotiation import NegotiationArena, NegotiationEpisode
+from legos.training import (
     Trainer,
     TrainerConfig,
     training_loop,

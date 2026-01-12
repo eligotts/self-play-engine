@@ -10,8 +10,8 @@ Core Concepts:
 - Arena: Persistent state container + orchestration
 
 Example Usage:
-    from self_play import Arena, Actor, MockInferenceClient
-    from self_play.tasks import GSM8KArena, GSM8KEpisode
+    from legos import Arena, Actor, MockInferenceClient
+    from legos.tasks import GSM8KArena, GSM8KEpisode
 
     # Create arena with GSM8K setup
     arena = GSM8KArena(client=MockInferenceClient(), episodes_per_step=4)

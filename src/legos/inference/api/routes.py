@@ -10,8 +10,8 @@ from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 from safetensors.numpy import load as load_safetensors
 
-from self_play.inference.engine.async_engine import AsyncEngine
-from self_play.inference.types import (
+from legos.inference.engine.async_engine import AsyncEngine
+from legos.inference.types import (
     ChatCompletionChoice,
     ChatCompletionRequest,
     ChatCompletionResponse,

@@ -1,5 +1,5 @@
 """
-Task implementations for the self-play engine.
+Task implementations for legos.
 
 These tasks demonstrate how to implement various self-play scenarios:
 1. Proposer/Solver: AZR-style problem generation and solving

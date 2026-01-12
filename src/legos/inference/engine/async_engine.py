@@ -6,7 +6,7 @@ from dataclasses import dataclass
 
 import mlx.core as mx
 
-from self_play.inference.engine.generation import ContinuousBatchingEngine
+from legos.inference.engine.generation import ContinuousBatchingEngine
 
 
 @dataclass

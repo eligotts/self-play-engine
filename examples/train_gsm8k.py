@@ -3,10 +3,10 @@ GSM8K: Train on math word problems using GRPO-style sampling.
 This is an example of how the self-play framework can be used in a more standard dataset-based training loop.
 
 To run:
-1. Configure LoRA parameters in src/self_play/lora.py
+1. Configure LoRA parameters in src/legos/lora.py
 
 2. Start inference server:
-   self-play serve --model /path/to/model
+   legos serve --model /path/to/model
 
 3. Run training:
    uv run examples/train_gsm8k.py
@@ -20,15 +20,15 @@ import argparse
 import mlx.optimizers as optim
 from mlx_lm import load
 
-from self_play.core import OpenAIClient, Actor, Artifact, GRPOCredit
-from self_play.lora import apply_lora, print_trainable_params
-from self_play.tasks.gsm8k import (
+from legos.core import OpenAIClient, Actor, Artifact, GRPOCredit
+from legos.lora import apply_lora, print_trainable_params
+from legos.tasks.gsm8k import (
     GSM8KArena,
     GSM8KEpisode,
     load_gsm8k,
     gsm8k_reward,
 )
-from self_play.training import (
+from legos.training import (
     Trainer,
     TrainerConfig,
     training_loop,

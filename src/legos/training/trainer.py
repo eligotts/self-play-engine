@@ -299,7 +299,7 @@ class Trainer:
         avg_clip = total_clip_fraction / num_samples
 
         # Compute reward stats from accumulated records
-        reward_stats = compute_per_role_reward_stats(self._pending_records)
+        reward_stats = compute_per_actor_reward_stats(self._pending_records)
         if num_samples > 0:
             reward_stats["avg_reward"] = sum(r.reward for r in self._pending_records) / num_samples
             reward_stats["avg_advantage"] = sum(r.advantage for r in self._pending_records) / num_samples

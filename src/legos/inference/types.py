@@ -70,7 +70,7 @@ class ModelInfo(BaseModel):
     id: str
     object: Literal["model"] = "model"
     created: int
-    owned_by: str = "self-play"
+    owned_by: str = "legos"
 
 
 class ModelListResponse(BaseModel):

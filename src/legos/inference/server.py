@@ -8,9 +8,9 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from mlx_lm import load
 
-from self_play.inference.api import adapter_router, router
-from self_play.inference.config import ServerConfig
-from self_play.inference.engine.async_engine import AsyncEngine
+from legos.inference.api import adapter_router, router
+from legos.inference.config import ServerConfig
+from legos.inference.engine.async_engine import AsyncEngine
 
 # Global config - can be overridden before create_app() is called
 _config: ServerConfig | None = None
@@ -40,7 +40,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
     # Initialize LoRA layers (for dynamic weight updates)
     if config.enable_lora:
-        from self_play.lora import apply_lora
+        from legos.lora import apply_lora
         apply_lora(model, inference_mode=True)
 
     engine = AsyncEngine(

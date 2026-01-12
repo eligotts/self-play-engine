@@ -1,5 +1,5 @@
 """
-Core types for the self-play engine.
+Core types for legos.
 
 All data structures are defined here:
 - Message types: Message, Messages

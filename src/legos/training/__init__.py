@@ -11,9 +11,9 @@ the core patterns of modern RL training:
 - Online weight updates to inference server (LoRA hot-swap)
 
 Example usage:
-    from self_play.core import OpenAIClient
-    from self_play.tasks import GSM8KArena
-    from self_play.training import Trainer, TrainerConfig, training_loop
+    from legos.core import OpenAIClient
+    from legos.tasks import GSM8KArena
+    from legos.training import Trainer, TrainerConfig, training_loop
 
     # Setup arena
     client = OpenAIClient(base_url="http://localhost:8000/v1")

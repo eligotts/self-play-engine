@@ -56,10 +56,7 @@ The model learns to:
 ### Running It
 
 ```bash
-python examples/train_gsm8k.py \
-    --model-path mlx-community/Qwen2.5-1.5B-Instruct-4bit \
-    --num-steps 100 \
-    --episodes-per-step 8
+uv run examples/train_gsm8k.py
 ```
 
 ---
@@ -152,10 +149,7 @@ Why RAE? Player0 might have a structural advantage (first-mover). RAE maintains 
 ### Running It
 
 ```bash
-python examples/train_negotiation.py \
-    --model-path mlx-community/Qwen2.5-1.5B-Instruct-4bit \
-    --num-steps 200 \
-    --max-turns 10
+uv run examples/train_negotiation.py
 ```
 
 ---
@@ -255,10 +249,7 @@ async def on_train_start(self):
 ### Running It
 
 ```bash
-python examples/train_proposer_solver.py \
-    --model-path mlx-community/Qwen2.5-1.5B-Instruct-4bit \
-    --num-steps 200 \
-    --n-solver-rollouts 8
+uv run examples/train_proposer_solver.py
 ```
 
 ---
@@ -319,11 +310,7 @@ The TaskProposer is non-trainable—it just populates the task store.
 ### Running It
 
 ```bash
-python examples/train_refine_loop.py \
-    --model-path mlx-community/Qwen2.5-1.5B-Instruct-4bit \
-    --num-steps 100 \
-    --refine-iterations 3 \
-    --judge-model openai/gpt-4o-mini
+uv run examples/train_refine_loop.py
 ```
 
 ---
@@ -400,10 +387,7 @@ class ChallengeProposerEpisode(Episode):
 ### Running It
 
 ```bash
-python examples/train_head_to_head.py \
-    --model-path mlx-community/Qwen2.5-1.5B-Instruct-4bit \
-    --num-steps 200 \
-    --judge-model openai/gpt-4o-mini
+uv run examples/train_head_to_head.py
 ```
 
 ---
@@ -490,11 +474,7 @@ async def on_train_start(self):
 ### Running It
 
 ```bash
-python examples/train_spice.py \
-    --model-path mlx-community/Qwen2.5-1.5B-Instruct-4bit \
-    --corpus-path data/documents/ \
-    --num-steps 200 \
-    --n-solver-rollouts 4
+uv run examples/train_spice.py
 ```
 
 ---

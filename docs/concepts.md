@@ -1,6 +1,6 @@
 # Core Concepts
 
-This document explains the self-play abstractions in depth. For a quick overview, see the [README](../README.md).
+This document explains the core abstractions in depth. For a quick overview, see the [README](../README.md).
 
 ---
 

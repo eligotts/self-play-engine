@@ -10,10 +10,10 @@ would rather an external validator like deterministic execution of code to get t
 Inspired by general structure from Absolute Zero paper (arXiv:2505.03335).
 
 To run:
-1. Configure LoRA parameters in src/self_play/lora.py
+1. Configure LoRA parameters in src/legos/lora.py
 
 2. Start inference server:
-   self-play serve --model /path/to/model
+   legos serve --model /path/to/model
 
 3. Run training:
    uv run examples/train_proposer_solver.py
@@ -24,10 +24,10 @@ import argparse
 import mlx.optimizers as optim
 from mlx_lm import load
 
-from self_play.core import OpenAIClient, Actor, Artifact
-from self_play.lora import apply_lora, print_trainable_params
-from self_play.tasks.proposer_solver import ProposerSolverArena, ProposerEpisode, SolveEpisode
-from self_play.training import (
+from legos.core import OpenAIClient, Actor, Artifact
+from legos.lora import apply_lora, print_trainable_params
+from legos.tasks.proposer_solver import ProposerSolverArena, ProposerEpisode, SolveEpisode
+from legos.training import (
     Trainer,
     TrainerConfig,
     training_loop,

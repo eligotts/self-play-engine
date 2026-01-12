@@ -8,6 +8,7 @@ OpenAIClient: OpenAI-compatible client for mlx-vllm
 from __future__ import annotations
 
 import os
+import sys
 from abc import ABC, abstractmethod
 from typing import Any, Callable, Dict, List, Optional
 
@@ -139,6 +140,7 @@ class OpenAIClient(InferenceClient):
         self.model = model
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout
+        self._warned_missing_tokens = False
 
         # For local servers, any non-empty key works
         is_local = "localhost" in self.base_url or "127.0.0.1" in self.base_url
@@ -185,8 +187,8 @@ class OpenAIClient(InferenceClient):
 
         # OpenRouter-specific headers (only for openrouter.ai)
         if "openrouter.ai" in self.base_url:
-            headers["HTTP-Referer"] = "https://github.com/self-play-engine"
-            headers["X-Title"] = "Self-Play Engine"
+            headers["HTTP-Referer"] = "https://github.com/eligottlieb/legos"
+            headers["X-Title"] = "Legos"
 
         response = await self._client.post(
             f"{self.base_url}/chat/completions",
@@ -213,6 +215,16 @@ class OpenAIClient(InferenceClient):
 
             # Extract logprobs
             logprobs_data = choice.get("logprobs")
+            if (
+                not self._warned_missing_tokens
+                and (real_prompt_ids is None or real_completion_ids is None or not logprobs_data)
+            ):
+                print(
+                    "[legos] WARNING: Response missing token IDs/logprobs; "
+                    "using hashed tokens. Remote APIs are not supported for training.",
+                    file=sys.stderr,
+                )
+                self._warned_missing_tokens = True
             if logprobs_data and logprobs_data.get("content"):
                 content_logprobs = logprobs_data["content"]
                 completion_logprobs = [token_info.get("logprob", 0.0) for token_info in content_logprobs]

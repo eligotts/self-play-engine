@@ -12,7 +12,7 @@ Core Components:
 - GenerationOutput: Result from completed generation
 
 Usage:
-    from self_play.inference import ContinuousBatchingEngine, GenerationOutput
+    from legos.inference import ContinuousBatchingEngine, GenerationOutput
 
     engine = ContinuousBatchingEngine(model, tokenizer)
     request_id = engine.add(prompt_tokens, max_tokens=256)
@@ -20,6 +20,6 @@ Usage:
         completed = engine.step()
 """
 
-from self_play.inference.engine import ContinuousBatchingEngine, GenerationOutput, AsyncEngine
+from legos.inference.engine import ContinuousBatchingEngine, GenerationOutput, AsyncEngine
 
 __all__ = ["ContinuousBatchingEngine", "GenerationOutput", "AsyncEngine"]

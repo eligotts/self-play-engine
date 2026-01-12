@@ -1,5 +1,5 @@
 """
-Core abstractions for the self-play engine.
+Core abstractions for legos.
 
 Simple, focused:
 - Actor: trainable entity

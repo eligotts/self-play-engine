@@ -5,10 +5,10 @@ Trains a model through head-to-head competition on creative challenges.
 The same model plays both sides, with an LLM judge picking winners.
 
 To run:
-1. Configure LoRA parameters in src/self_play/lora.py
+1. Configure LoRA parameters in src/legos/lora.py
 
 2. Start inference server:
-   self-play serve --model /path/to/model
+   legos serve --model /path/to/model
 
 3. Run training:
    uv run examples/train_head_to_head.py
@@ -19,10 +19,10 @@ import argparse
 import mlx.optimizers as optim
 from mlx_lm import load
 
-from self_play.core import OpenAIClient, Actor, Artifact, GRPOCredit
-from self_play.lora import apply_lora, print_trainable_params
-from self_play.tasks.head_to_head import HeadToHeadArena, MatchEpisode, ChallengeProposerEpisode
-from self_play.training import (
+from legos.core import OpenAIClient, Actor, Artifact, GRPOCredit
+from legos.lora import apply_lora, print_trainable_params
+from legos.tasks.head_to_head import HeadToHeadArena, MatchEpisode, ChallengeProposerEpisode
+from legos.training import (
     Trainer,
     TrainerConfig,
     training_loop,

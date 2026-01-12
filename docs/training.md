@@ -319,10 +319,8 @@ Benefits:
 ### Configuration
 
 ```python
-python -m self_play.inference.server \
+uv run legos serve \
     --model mlx-community/Qwen2.5-1.5B-Instruct-4bit \
-    --lora-rank 8 \
-    --lora-layers 16 \
     --port 8000
 ```
 

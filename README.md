@@ -1,4 +1,4 @@
-# Self-Play Engine
+# Legos
 
 **Composable primitives that turn any multi-agent interaction into a self-improving training loop.**
 
@@ -39,12 +39,11 @@ You've written a 50-line Episode subclass. Now you have a self-improving trainin
 
 ```bash
 # Terminal 1: Start the inference server with LoRA hot-swap
-python -m self_play.inference.server \
-    --model mlx-community/Qwen2.5-1.5B-Instruct-4bit \
-    --lora-rank 8
+uv run legos serve \
+    --model mlx-community/Qwen2.5-1.5B-Instruct-4bit
 
 # Terminal 2: Run training
-python examples/train_gsm8k.py --num-steps 100
+uv run examples/train_gsm8k.py
 ```
 
 Weights update in real-time. Watch the model improve on math problems as you train.
@@ -183,11 +182,11 @@ Each is ~100-150 lines. Extend `Episode` to build your own.
 
 ```bash
 # Requires Python 3.12+, Apple Silicon recommended
-pip install self-play-engine
+pip install legos
 
 # Or from source
-git clone https://github.com/your-org/self-play-engine
-cd self-play-engine
+git clone https://github.com/eligottlieb/legos
+cd legos
 pip install -e .
 ```
 
@@ -198,7 +197,7 @@ pip install -e .
 ## Project Structure
 
 ```
-src/self_play/
+src/legos/
 ├── core/
 │   ├── types.py       # Actor, Step, Rollout, TrainingRecord
 │   ├── episode.py     # Episode, EpisodeState, ChatEpisode
@@ -212,7 +211,3 @@ src/self_play/
 ```
 
 ---
-
-## License
-
-MIT

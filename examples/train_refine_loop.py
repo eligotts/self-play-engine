@@ -6,10 +6,10 @@ The Generator creates drafts, the Critic provides feedback, and this iterates.
 Both actors share the same reward.
 
 To run:
-1. Configure LoRA parameters in src/self_play/lora.py
+1. Configure LoRA parameters in src/legos/lora.py
 
 2. Start inference server:
-   self-play serve --model /path/to/model
+   legos serve --model /path/to/model
 
 3. Run training:
    uv run examples/train_refine_loop.py
@@ -20,10 +20,10 @@ import argparse
 import mlx.optimizers as optim
 from mlx_lm import load
 
-from self_play.core import OpenAIClient, Actor, Artifact, GRPOCredit
-from self_play.lora import apply_lora, print_trainable_params
-from self_play.tasks.refine_loop import RefineLoopArena, RefineLoopEpisode, TaskProposerEpisode
-from self_play.training import (
+from legos.core import OpenAIClient, Actor, Artifact, GRPOCredit
+from legos.lora import apply_lora, print_trainable_params
+from legos.tasks.refine_loop import RefineLoopArena, RefineLoopEpisode, TaskProposerEpisode
+from legos.training import (
     Trainer,
     TrainerConfig,
     training_loop,

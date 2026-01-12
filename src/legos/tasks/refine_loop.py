@@ -78,12 +78,17 @@ Consider: clarity, completeness, accuracy, and style.
 Respond with ONLY a JSON object: {{"score": <0-10>, "reason": "<very very brief reason>"}}"""},
     ]
 
-    response = await _openrouter_client.chat.completions.create(
-        model="google/gemini-3-flash-preview",
-        messages=judge_messages,
-        temperature=0.3,
-        max_tokens=200,
-    )
+    try:
+        response = await _openrouter_client.chat.completions.create(
+            model="google/gemini-3-flash-preview",
+            messages=judge_messages,
+            temperature=0.3,
+            max_tokens=200,
+        )
+    except Exception as exc:
+        raise RuntimeError(
+            "LLM judge call failed. Check OPENROUTER_API_KEY and network access."
+        ) from exc
 
     # Parse score
     try:

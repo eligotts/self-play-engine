@@ -1,5 +1,5 @@
 """
-Episode: Core rollout logic for the self-play engine.
+Episode: Core rollout logic for legos.
 
 Episodes are composable units of work tied together by reward dependency.
 The base Episode class is minimal - subclasses implement rollout() however they need.

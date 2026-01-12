@@ -13,13 +13,13 @@ Key concepts:
 - Example of how solver episodes can be used as training examples (compare to proposer_solver.py which does NOT train on solver episodes)
 
 To run:
-1. Configure LoRA parameters in src/self_play/lora.py
+1. Configure LoRA parameters in src/legos/lora.py
 
 2. Set your OpenRouter API key (for the LLM judge):
    export OPENROUTER_API_KEY=your-key-here
 
 3. Start inference server:
-   self-play serve --model /path/to/model
+   legos serve --model /path/to/model
 
 4. Run training:
    uv run examples/train_spice.py
@@ -32,10 +32,10 @@ from pathlib import Path
 import mlx.optimizers as optim
 from mlx_lm import load
 
-from self_play.core import OpenAIClient, Actor, Artifact
-from self_play.lora import apply_lora, print_trainable_params
-from self_play.tasks.spice import SpiceArena, SpiceProposerEpisode, SpiceSolverEpisode
-from self_play.training import (
+from legos.core import OpenAIClient, Actor, Artifact
+from legos.lora import apply_lora, print_trainable_params
+from legos.tasks.spice import SpiceArena, SpiceProposerEpisode, SpiceSolverEpisode
+from legos.training import (
     Trainer,
     TrainerConfig,
     training_loop,

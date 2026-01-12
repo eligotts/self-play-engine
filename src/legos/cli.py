@@ -1,16 +1,16 @@
 """
-CLI for the self-play engine.
+CLI for the legos engine.
 
 Usage:
-    self-play serve [OPTIONS]     Start the inference server
-    self-play --help              Show help
+    legos serve [OPTIONS]     Start the inference server
+    legos --help              Show help
 
 Examples:
-    self-play serve
-    self-play serve --model /path/to/model
-    self-play serve --port 8080
+    legos serve
+    legos serve --model /path/to/model
+    legos serve --port 8080
 
-LoRA settings are configured in src/self_play/lora.py
+LoRA settings are configured in src/legos/lora.py
 """
 
 import argparse
@@ -21,8 +21,8 @@ def serve_command(args: argparse.Namespace) -> None:
     """Start the inference server."""
     import uvicorn
 
-    from self_play.inference.config import ServerConfig
-    from self_play.inference.server import set_config
+    from legos.inference.config import ServerConfig
+    from legos.inference.server import set_config
 
     # Build config, overriding with CLI args if provided
     config_overrides = {}
@@ -49,7 +49,7 @@ def serve_command(args: argparse.Namespace) -> None:
     config = ServerConfig(**config_overrides)
     set_config(config)
 
-    print("Starting Self-Play Inference Server")
+    print("Starting Legos Inference Server")
     print(f"  Model: {config.model_path}")
     print(f"  Host: {config.host}:{config.port}")
     print(f"  Max batch size: {config.max_batch_size}")
@@ -58,7 +58,7 @@ def serve_command(args: argparse.Namespace) -> None:
     print(f"  LoRA: {'enabled' if config.enable_lora else 'disabled'}")
 
     uvicorn.run(
-        "self_play.inference.server:app",
+        "legos.inference.server:app",
         host=config.host,
         port=config.port,
         reload=False,
@@ -66,18 +66,18 @@ def serve_command(args: argparse.Namespace) -> None:
 
 
 def main() -> None:
-    """Main entry point for the self-play CLI."""
+    """Main entry point for the legos CLI."""
     parser = argparse.ArgumentParser(
-        prog="self-play",
-        description="Self-Play LLM RL Engine - Training and inference for self-play scenarios",
+        prog="legos",
+        description="Legos LLM RL Engine - Training and inference for self-play scenarios",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  self-play serve                      Start inference server
-  self-play serve --model /path/to/m   Use custom model
-  self-play serve --port 8080          Use custom port
+  legos serve                      Start inference server
+  legos serve --model /path/to/m   Use custom model
+  legos serve --port 8080          Use custom port
 
-LoRA settings: edit src/self_play/lora.py
+LoRA settings: edit src/legos/lora.py
         """,
     )
 
