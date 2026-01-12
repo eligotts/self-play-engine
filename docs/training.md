@@ -4,67 +4,49 @@ This document covers the RL training infrastructure built on MLX for Apple Silic
 
 ---
 
+## The Core Idea
+
+Complete separation between how data is generated and how it's trained on. The trainer doesn't care where the data comes from - it just pulls samples and trains. The arena doesn't care how training works - it just generates rollouts.
+
+---
+
 ## Architecture Overview
-
-The training system uses a **producer-consumer architecture**:
-
-```
-┌─────────────┐     ┌───────────────┐     ┌─────────────┐
-│   Arena     │────▶│  Async Queue  │────▶│   Trainer   │
-│ (Generator) │     │               │     │             │
-└─────────────┘     └───────────────┘     └─────────────┘
-       │                                         │
-       │         ┌───────────────────┐           │
-       └────────▶│ Inference Server  │◀──────────┘
-                 │ (LoRA hot-swap)   │
-                 └───────────────────┘
-```
 
 - **Arena** generates rollouts, scores them, and pushes `TrainingBatch` objects to a queue
 - **Trainer** pulls batches, computes loss, updates weights
 - **Inference Server** serves the model with LoRA adapters that update in real-time
 
-Generation and training run concurrently—the arena doesn't wait for the trainer, and the trainer doesn't wait for the arena.
+Generation and training run concurrently - the arena doesn't wait for the trainer, and the trainer doesn't wait for the arena.
 
 ---
 
-## Training Loops
+## Consumer-Producer Pattern
 
-### Asynchronous Loop
-
-The default `training_loop()` runs generation and training concurrently:
+### The Async Loop
 
 ```python
-async def training_loop(
-    arena: Arena,
-    trainer: Trainer,
-    num_steps: int,
-    episode_concurrency: int = 8,
-    step_concurrency: int = 2,
-):
-    queue = asyncio.Queue(maxsize=step_concurrency)
-
+async def training_loop(arena, trainer, num_steps, batch_queue):
     async def generator():
+        """Keep generating batches and pushing to queue."""
         for _ in range(num_steps):
             batch = await arena.step(concurrency=episode_concurrency)
-            await queue.put(batch)
+            await batch_queue.put(batch)
 
     async def consumer():
+        """Pull batches from queue and train."""
         for _ in range(num_steps):
-            batch = await queue.get()
-            trainer.train_step(batch)
+            batch = await batch_queue.get()
+            # Filter stale records, form micro-batches, train
+            trainer.accumulate(batch.records)
 
     await asyncio.gather(generator(), consumer())
 ```
 
-Benefits:
-- Higher throughput: generation doesn't block training
-- Natural backpressure: queue limits prevent memory explosion
-- Efficient GPU utilization
+The queue provides natural backpressure - if training falls behind, the queue fills up and generation waits.
 
 ### Synchronous Loop
 
-For debugging or when you need strict ordering:
+For when you dont want to both generate and train at the same time:
 
 ```python
 async def synchronous_training_loop(arena, trainer, num_steps):
@@ -79,7 +61,7 @@ Simpler, easier to debug, but lower throughput.
 
 ## Micro-Batch Streaming
 
-Training records have variable lengths. Instead of padding everything to max length, the trainer uses **token-budget-based micro-batching**:
+We use **token-budget-based micro-batching** to control memory usage:
 
 ```python
 def form_micro_batch(records, token_budget):
@@ -95,38 +77,53 @@ def form_micro_batch(records, token_budget):
     return batch
 ```
 
-Benefits:
-- Consistent memory usage regardless of sequence length distribution
-- No wasted compute on padding tokens
-- Works with mixed-length batches (e.g., different episode types)
-
 ### Gradient Accumulation
 
 Gradients accumulate across micro-batches until `min_samples_per_step` is reached:
 
 ```python
 class Trainer:
-    def train_step(self, batch):
-        for micro_batch in form_micro_batches(batch.records):
+    def accumulate(self, records):
+        while records:
+            micro_batch = form_micro_batch(records, self.micro_batch_tokens)
+            records = records[len(micro_batch):]
+
             loss, grads = value_and_grad(self.loss_fn)(micro_batch)
             self.accumulated_grads += grads * weight
 
         if self.accumulated_samples >= self.min_samples_per_step:
             self.optimizer.step(self.accumulated_grads)
-            self.accumulated_grads = None
-            self.accumulated_samples = 0
+            # Publish new weights to inference server
+            await self.publish_weights()
 ```
 
 ---
 
-## Importance Sampling
+## Loss Functions
+
+The loss function is where all the RL magic happens. Here's what's implemented:
+
+### Token vs Sample Level Normalization
+
+Two modes for the policy gradient loss:
+
+**Token-level (DAPO)** - Default:
+```python
+loss = masked_loss.sum() / mask.sum()
+```
+Equal weight per token. Longer completions contribute more to the gradient.
+
+**Sample-level (GRPO)**:
+```python
+loss = (masked_loss.sum(dim=-1) / mask.sum(dim=-1)).mean()
+```
+Equal weight per sample. Length-invariant.
+
+### Importance Sampling
 
 Off-policy training requires importance sampling to correct for distribution shift.
 
-### Token-Level (PPO-Style)
-
-The default mode computes per-token importance ratios:
-
+**Token-Level (PPO-Style)** - Default:
 ```python
 log_ratio = trainer_logprobs - inference_logprobs  # Per-token
 importance_ratio = exp(log_ratio)
@@ -135,13 +132,7 @@ importance_ratio = exp(log_ratio)
 clipped_ratio = clip(importance_ratio, 1 - epsilon, 1 + epsilon)
 loss = -min(ratio * advantage, clipped_ratio * advantage)
 ```
-
-Typical clipping range: `[0.8, 1.2]`
-
-### Sequence-Level (GSPO)
-
-For tighter control, sequence-level importance sampling:
-
+**Sequence-Level (GSPO)**:
 ```python
 # Average log ratio across completion tokens
 seq_log_ratio = mean(log_ratio[mask])
@@ -151,19 +142,50 @@ si = exp(seq_log_ratio)
 si_clipped = clip(si, 1 - epsilon, 1 + epsilon)  # epsilon ≈ 3e-4
 ```
 
-Based on [arXiv:2512.21852](https://arxiv.org/abs/2512.21852). Prevents large policy updates from single sequences.
+### KL Penalty (K1 Advantage Shaping)
 
-### Clip Skip Threshold
+Based on [Shah et al., 2025](https://arxiv.org/abs/2512.21852). Regularize against a reference policy to prevent collapse. In the paper they subtract from rewards, but here we don't have access to raw rewards, so we subtract from advantages:
+
+```python
+# K1 = log π_new - log π_ref (per-token KL contribution)
+k1_per_token = trainer_logprobs - reference_logprobs
+k1_seq = mean(k1_per_token[mask])  # Sequence-level
+
+# Clip for stability
+k1_clipped = clip(k1_seq, -kl_max, kl_max)
+
+# Subtract from advantage (shaping, not penalty)
+shaped_advantage = advantage - kl_coef * k1_clipped
+```
+
+The reference policy is the base model (without LoRA). We compute it efficiently by temporarily disabling LoRA:
+
+```python
+def get_ref_logprobs(model, input_ids):
+    # Temporarily disable LoRA
+    original_scales = save_lora_scales(model)
+    set_lora_scales(model, 0.0)
+
+    ref_logprobs = forward(model, input_ids)
+
+    # Restore LoRA
+    restore_lora_scales(model, original_scales)
+    return ref_logprobs
+```
+
+No need for a separate reference model in memory.
+
+### Zero Gradient Filtering (Clip Skip)
 
 If too many tokens are clipped, the batch is likely off-policy garbage:
 
 ```python
 clip_fraction = (importance_ratio < 0.8 | importance_ratio > 1.2).mean()
 if clip_fraction > clip_skip_threshold:  # Default: 0.3
-    return zero_loss  # Skip this batch entirely
+    return zero_loss, {"skip_batch": True}
 ```
 
-This prevents training on severely divergent samples.
+This prevents training on severely divergent samples. The trainer tracks skipped batches in metrics.
 
 ---
 
@@ -187,53 +209,6 @@ def filter_fresh(records, current_version, staleness_limit=3):
     ]
 ```
 
-This prevents training on data generated by an old policy, which could cause distribution shift.
-
----
-
-## Loss Functions
-
-### GRPO vs DAPO Normalization
-
-Two normalization modes for the policy gradient loss:
-
-**Token-level (DAPO)**:
-```python
-loss = masked_loss.sum() / mask.sum()
-```
-Equal weight per token. Longer completions contribute more.
-
-**Sample-level (GRPO)**:
-```python
-loss = (masked_loss.sum(dim=-1) / mask.sum(dim=-1)).mean()
-```
-Equal weight per sample. Length-invariant.
-
-### KL Penalty
-
-Regularize against a reference policy to prevent collapse:
-
-```python
-kl = trainer_logprobs - reference_logprobs
-kl_penalty = kl_coef * max(kl, 0)  # One-sided (K1 shaping)
-```
-
-The reference policy is the base model (without LoRA). We compute it efficiently by temporarily setting LoRA scales to zero:
-
-```python
-@contextmanager
-def disable_lora(model):
-    scales = save_lora_scales(model)
-    set_lora_scales(model, 0.0)
-    yield
-    restore_lora_scales(model, scales)
-
-with disable_lora(model):
-    ref_logprobs = model(input_ids)
-```
-
-No need for a separate reference model in memory.
-
 ---
 
 ## LoRA Hot-Swap
@@ -245,15 +220,14 @@ The inference server supports hot-swapping LoRA weights without restart.
 After each training step, the trainer publishes weights:
 
 ```python
-class Trainer:
-    async def publish_weights(self, server_url):
-        weights = get_lora_weights(self.model)
-        encoded = base64_encode(safetensors_serialize(weights))
+async def publish_weights(self, server_url):
+    weights = get_lora_weights(self.model)
+    encoded = base64_encode(safetensors_serialize(weights))
 
-        await httpx.post(
-            f"{server_url}/adapters/load",
-            json={"weights": encoded, "version": self.train_step_idx}
-        )
+    await httpx.post(
+        f"{server_url}/adapters/load",
+        json={"weights": encoded, "version": self.train_step_idx}
+    )
 ```
 
 ### Async Application
@@ -273,8 +247,6 @@ class AsyncEngine:
             # Process inference requests
             await self._generation_step()
 ```
-
-This ensures thread safety—weights only update between requests, never during.
 
 ---
 
@@ -318,7 +290,7 @@ Benefits:
 
 ### Configuration
 
-```python
+```bash
 uv run legos serve \
     --model mlx-community/Qwen2.5-1.5B-Instruct-4bit \
     --port 8000
@@ -326,80 +298,54 @@ uv run legos serve \
 
 ---
 
-## Memory Management
-
-MLX on Apple Silicon requires careful memory management to avoid lazy evaluation accumulating computation graphs.
-
-### Explicit Materialization
-
-After each micro-batch:
-
-```python
-mx.eval(self.model.parameters())
-mx.eval(self.optimizer.state)
-mx.clear_cache()
-```
-
-This forces computation and releases intermediate tensors.
-
-### Gradient Checkpointing
-
-For large models, use gradient checkpointing to trade compute for memory:
-
-```python
-# Recompute activations during backward pass
-with mx.checkpoint():
-    loss = self.loss_fn(batch)
-```
-
----
-
 ## Configuration
 
-Training configuration via `TrainingConfig`:
+Training configuration via `TrainerConfig`:
 
 ```python
 @dataclass
-class TrainingConfig:
+class TrainerConfig:
+    # Optimizer
+    lr: float = 1e-5
+
     # Batching
     micro_batch_tokens: int = 4096
     min_samples_per_step: int = 16
 
     # Importance sampling
-    importance_sampling: str = "token"  # or "sequence"
-    clip_range: float = 0.2
+    ppo_clip_min: float = 0.8
+    ppo_clip_max: float = 1.2
     clip_skip_threshold: float = 0.3
+    importance_sampling: str = "token"  # or "sequence"
+    gspo_clip_epsilon: float = 3e-4
 
-    # Staleness
+    # Loss normalization
+    loss_type: str = "token"  # or "sample"
+
+    # KL regularization
+    kl_coef: float = 0.1
+    use_kl_penalty: bool = False
+    kl_max: float = 10.0
+
+    # Off-policy
     staleness_limit: int = 3
 
-    # Regularization
-    kl_coef: float = 0.1
+    # Infrastructure
+    inference_url: str = "http://localhost:8000"
+    pad_token_id: int = 0
 
-    # LoRA
-    lora_rank: int = 8
-    lora_layers: int = 16
+    # Evaluation
+    eval_every: int = 10
+    eval_concurrency: int = 8
+
+    # Checkpointing
+    checkpoint_every: int = 100
+    checkpoint_dir: str = "checkpoints"
+
+    # Logging
+    wandb_project: Optional[str] = None
+    wandb_run_name: Optional[str] = None
 ```
-
----
-
-## Logging and Monitoring
-
-Training metrics are logged to Weights & Biases:
-
-```python
-wandb.log({
-    "loss": loss,
-    "clip_fraction": clip_fraction,
-    "kl_divergence": kl.mean(),
-    "advantage_mean": advantages.mean(),
-    "advantage_std": advantages.std(),
-    "policy_version": version,
-    "samples_per_step": num_samples,
-})
-```
-
-The async training loop ensures correct W&B step ordering even with concurrent generation.
 
 ---
 
@@ -409,20 +355,22 @@ A complete training run:
 
 ```python
 # 1. Initialize components
-model = load_model("mlx-community/Qwen2.5-1.5B-Instruct-4bit")
-apply_lora(model, rank=8, layers=16)
+model, tokenizer = load("mlx-community/Qwen2.5-1.5B-Instruct-4bit")
+apply_lora(model, inference_mode=False)
 
-trainer = Trainer(
-    model=model,
-    config=TrainingConfig(
-        micro_batch_tokens=4096,
-        staleness_limit=3,
-        kl_coef=0.1,
-    ),
+optimizer = optim.Adam(learning_rate=1e-5)
+config = TrainerConfig(
+    micro_batch_tokens=4096,
+    staleness_limit=3,
+    kl_coef=0.1,
+    use_kl_penalty=False,
 )
 
 client = OpenAIClient(base_url="http://localhost:8000/v1")
+trainer = Trainer(model, optimizer, config, client)
+
 arena = MyArena(client, credit_assigner=GRPOCredit())
+# ... add actors, episodes, stores ...
 
 # 2. Run training
 await training_loop(

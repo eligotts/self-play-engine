@@ -2,7 +2,7 @@
 HeadToHead: Tournament competition with LLM-judged matches.
 
 Trains a model through head-to-head competition on creative challenges.
-The same model plays both sides, with an LLM judge picking winners.
+The same model plays both sides (with slightly different system prompts), with an LLM judge picking winners.
 
 To run:
 1. Configure LoRA parameters in src/legos/lora.py

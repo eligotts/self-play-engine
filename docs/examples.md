@@ -4,107 +4,76 @@ This document walks through each built-in example, showing how the core abstract
 
 ---
 
-## GSM8K: Basic GRPO Training
+## Two Main Patterns I've Identified
 
-**Pattern**: Single actor, dataset-based, GRPO credit assignment
+**Pattern 1: Proposer/Solver** - Same model generates data then trains on it. A proposer generates a question, we get ground truth somehow, then get reward by using the model to solve that question and seeing how well it does.
 
-GSM8K is the simplest example—a model learns to solve math word problems using reward shaping.
+Examples:
+- [Absolute Zero](https://arxiv.org/abs/2505.03335) - Reinforced self-play reasoning with zero data
+- [SPICE](https://arxiv.org/abs/2510.24684) - Corpus-grounded self-play
+- [Language Self-Play](https://arxiv.org/abs/2509.07414) - Data-free training
 
-### Episode Structure
-
-```python
-class GSM8KArena(Arena):
-    def get_batch(self) -> List[EpisodeRequest]:
-        # Sample one question, repeat N times (GRPO)
-        sample = self.stores["gsm8k"].sample_one()
-        return [
-            EpisodeRequest("gsm8k", sample.data)
-            for _ in range(self.episodes_per_step)
-        ]
-```
-
-Each batch contains multiple rollouts of the same question. GRPO computes advantages relative to the group—if one rollout gets the right answer and another doesn't, the correct one gets positive advantage.
-
-### Reward Composition
-
-Three reward signals combined:
-
-```python
-def gsm8k_reward(rollout: Rollout, arena: Arena) -> Dict[str, float]:
-    text = rollout.steps[0].completion_text
-
-    # Format: did the model use <answer> tags?
-    format_reward = 0.25 if "<answer>" in text else 0.0
-
-    # Correctness: does the answer match ground truth?
-    parsed = extract_answer(text)
-    correct = normalize(parsed) == normalize(rollout.artifact["answer"])
-    correctness_reward = 1.0 if correct else 0.0
-
-    # Brevity: bonus for concise answers
-    tokens = len(text.split())
-    brevity_reward = max(0, 0.5 - tokens / 200)
-
-    return {"Solver": format_reward + correctness_reward + brevity_reward}
-```
-
-The model learns to:
-1. Use the correct format (`<answer>` tags)
-2. Get the right answer
-3. Be concise
-
-### Running It
-
-```bash
-uv run examples/train_gsm8k.py
-```
+**Pattern 2: Two-Player Games** - Same model plays against itself in a more game-like setting. Can be zero-sum games like [SPIRAL](https://arxiv.org/abs/2506.24119), head-to-head competition, or cooperative setups like a generator and critic working together to improve (refine loop).
 
 ---
 
-## Negotiation: Multi-Agent Games
+## Negotiation: Two-Player Games
 
-**Pattern**: Two-player game, actor-conditioned credit (RAE), complex state management
+**Pattern**: Two-player zero-sum game, actor-conditioned credit (RAE), complex state management
 
-Two players trade resources. Player0 values Gold highly; Player1 values Wood highly. Both try to maximize their inventory value.
+Based on [SPIRAL](https://arxiv.org/abs/2506.24119)'s SimpleNegotiation. Two players trade resources. Player0 values Gold highly; Player1 values Wood highly. Both try to maximize their inventory value.
 
-### Game State
+### Game Setup
 
 ```python
-class NegotiationEpisode(MultiTurnEpisode):
-    def __init__(self):
-        self.initial_inventory = {"Gold": 3, "Wood": 3, "Stone": 3}
-        self.player_values = {
-            "Player0": {"Gold": 10, "Wood": 1, "Stone": 5},
-            "Player1": {"Gold": 1, "Wood": 10, "Stone": 5},
-        }
+# Player 0: values Gold more (Wood=5, Gold=15)
+# Player 1: values Wood more (Wood=15, Gold=5)
+# Both start with 10 Wood + 10 Gold
+# Winner = player with larger inventory value change
 ```
 
 State is tracked in `EpisodeState.data`:
 - Current inventories
 - Trade history
 - Whose turn it is
+- Pending offers
 - Whether an invalid action occurred
 
 ### Turn Flow
 
 ```python
-async def env_response(self, state, arena, artifact) -> str:
-    action = parse_action(state.last_completion_text)
+class NegotiationEpisode(MultiTurnEpisode):
+    async def env_response(self, state, arena, artifact) -> str:
+        action = parse_action(state.last_completion_text)
 
-    if action.type == "offer":
-        state.data["pending_offer"] = action.offer
-        return f"Offer pending: {action.offer}"
+        if action.type == "offer":
+            state.data["pending_offer"] = action.offer
+            return f"Offer pending: {action.offer}"
 
-    elif action.type == "accept":
-        execute_trade(state.data, action.offer)
-        return f"Trade completed."
+        elif action.type == "accept":
+            execute_trade(state.data)
+            return f"Trade completed."
 
-    elif action.type == "deny":
-        state.data["pending_offer"] = None
-        return "Offer denied."
+        elif action.type == "deny":
+            state.data["pending_offer"] = None
+            return "Offer denied."
 ```
 
-Invalid actions (offering more than you have, accepting when no offer pending) result in immediate episode termination with penalty.
+Players can make offers (`[Offer: I give X Wood, Y Gold for Z Wood, W Gold]`), accept (`[Accept]`), or deny (`[Deny]`). Invalid actions (offering more than you have, accepting when no offer pending) result in immediate termination with penalty.
+
+### Private Observations
+
+Each player gets private information about their own values:
+
+```python
+def get_observation(self, state, arena, artifact) -> str:
+    """Private to current player - NOT in transcript."""
+    player = state.current_actor
+    inv = state.data["player_resources"][player]
+    return f"Your resources: Wood={inv['Wood']}, Gold={inv['Gold']}"
+```
+
+This prevents opponents from inferring player-specific values from the conversation history.
 
 ### Reward Function
 
@@ -115,36 +84,28 @@ def negotiation_reward(rollout: Rollout, arena: Arena) -> Dict[str, float]:
     # Penalty for invalid actions
     if extras.get("invalid_action"):
         invalid_player = extras["invalid_action"]
-        return {invalid_player: -1.0, other_player: 0.5}
+        return {invalid_player: -1.5, other_player: 0.5}
 
-    # Reward based on inventory value change
-    rewards = {}
-    for player_id in ["Player0", "Player1"]:
-        initial_value = compute_value(
-            extras["initial_inventory"],
-            extras["player_values"][player_id]
-        )
-        final_value = compute_value(
-            extras["player_resources"][player_id],
-            extras["player_values"][player_id]
-        )
-        rewards[player_id] = (final_value - initial_value) / initial_value
-
-    return rewards
+    # Zero-sum based on value change
+    winner = extras.get("winner")
+    if winner == "Player0":
+        return {"Player0": 1.0, "Player1": -1.0}
+    elif winner == "Player1":
+        return {"Player0": -1.0, "Player1": 1.0}
+    else:
+        return {"Player0": 0.0, "Player1": 0.0}
 ```
 
-### Credit Assignment (RAE)
-
-Uses actor-conditioned EMA baselines:
+### Why RAE Credit?
 
 ```python
 arena = NegotiationArena(
     client=client,
-    credit_assigner=RAECredit(gamma=0.99)
+    credit_assigner=RAECredit(decay=0.95)
 )
 ```
 
-Why RAE? Player0 might have a structural advantage (first-mover). RAE maintains separate baselines per actor, adapting slowly to account for this.
+Player0 might have a structural advantage (first-mover). RAE maintains separate baselines per actor, adapting slowly to account for this. Without it, the first mover would consistently get higher advantages, distorting training.
 
 ### Running It
 
@@ -158,7 +119,9 @@ uv run examples/train_negotiation.py
 
 **Pattern**: Hierarchical episodes, Monte Carlo scoring, curriculum generation
 
-The Proposer generates math problems. Solvers attempt them. The Proposer is rewarded for generating problems at 50% difficulty—not too easy, not too hard.
+Inspired by [Absolute Zero](https://arxiv.org/abs/2505.03335). This is more of a toy example to demonstrate the proposer/solver pattern - in practice you wouldn't want the model generating both the question AND the answer. You'd want an external validator (like deterministic code execution) to get ground truth. But the structure is the same.
+
+The Proposer generates math problems. Solvers attempt them. The Proposer is rewarded for generating problems at ~50% difficulty - not too easy, not too hard.
 
 ### Episode Structure
 
@@ -166,15 +129,15 @@ The Proposer generates math problems. Solvers attempt them. The Proposer is rewa
 class ProposerEpisode(Episode):
     async def rollout(self, arena, artifact, state):
         # 1. Generate a question
-        prompt = self.build_proposer_prompt(arena)
+        prompt = "Generate a challenging math problem with a clear numerical answer..."
         response = await self.call_model("Proposer", prompt, arena)
-        question = parse_question(response.text)
+        question = parse_question(response.text)  # Extract question and answer
 
         # 2. Store for future curriculum
         if question.get("question"):
             arena.stores["questions"].add(Artifact(data=question))
 
-        # 3. Spawn solver sub-episodes
+        # 3. Spawn solver sub-episodes (Monte Carlo)
         requests = [
             EpisodeRequest(
                 episode_type="solve",
@@ -189,7 +152,7 @@ class ProposerEpisode(Episode):
         return state
 ```
 
-Key insight: `is_trainable=False` means solver completions inform the proposer's reward but don't enter the training batch.
+Key insight: `is_trainable=False` means solver completions inform the proposer's reward but don't enter the training batch. Only the proposer steps get trained.
 
 ### Pass Rate Extraction
 
@@ -199,12 +162,14 @@ def get_extras(self, state) -> Dict[str, Any]:
         r.rewards.get("Solver", 0.0)
         for r in state.child_results
     ]
-    pass_rate = sum(1 for r in solver_rewards if r > 0) / len(solver_rewards)
+    correct = sum(1 for r in solver_rewards if r > 0)
+    pass_rate = correct / len(solver_rewards)
 
     return {
         "pass_rate": pass_rate,
-        "solver_rewards": solver_rewards,
+        "solver_results": solver_rewards,
         "question": state.data.get("question"),
+        "ground_truth": state.data.get("ground_truth"),
     }
 ```
 
@@ -220,19 +185,21 @@ def proposer_pass_rate_reward(rollout: Rollout, arena: Arena) -> Dict[str, float
     return {"Proposer": reward}
 ```
 
-- Pass rate 0.5 → reward 1.0 (optimal)
+- Pass rate 0.5 → reward 1.0 (optimal - at capability frontier)
 - Pass rate 0.0 or 1.0 → reward 0.0 (too hard or too easy)
+
+This drives the proposer to generate problems that are challenging but solvable.
 
 ### Credit Assignment
 
 GRPO with hierarchy:
 
 ```
-Proposers: compared against other Proposers
+Proposers: compared against other Proposers in the batch
   └── Solvers: compared against sibling Solvers (same parent)
 ```
 
-A solver's advantage is relative to its siblings—solvers under a different proposer are a different group.
+A solver's advantage is relative to its siblings - solvers under a different proposer are a different group.
 
 ### Warmup Phase
 
@@ -240,10 +207,9 @@ Before training, populate the question store:
 
 ```python
 async def on_train_start(self):
-    # Generate initial questions
-    for _ in range(self.min_questions):
-        batch = await self.step(concurrency=1)
-        # Questions are stored as side effect
+    # Generate initial questions so solvers have something to work with
+    while self.stores["questions"].count() < self.min_questions:
+        await self.step(concurrency=1)
 ```
 
 ### Running It
@@ -254,81 +220,20 @@ uv run examples/train_proposer_solver.py
 
 ---
 
-## RefineLoop: External Judges
-
-**Pattern**: Cooperative multi-turn, generator/critic loop, external LLM judge
-
-A Generator writes drafts. A Critic provides feedback. The Generator revises. Repeat N times. Final quality judged by external LLM.
-
-### Turn Structure
-
-```
-Turn 0: Generator writes initial draft
-Turn 1: Critic provides feedback
-Turn 2: Generator revises based on feedback
-Turn 3: Critic provides more feedback
-...
-Turn N: Final draft evaluated by judge
-```
-
-### Cooperative Actors
-
-Both Generator and Critic share the same reward:
-
-```python
-def judge_reward(rollout: Rollout, arena: Arena) -> Dict[str, float]:
-    final_draft = rollout.extras["final_draft"]
-
-    # External judge (OpenRouter)
-    prompt = f"Rate this writing 0-10: {final_draft}"
-    response = await judge_client.complete(prompt)
-    score = parse_score(response.text) / 10.0
-
-    # Both actors get same reward (cooperative)
-    return {"Generator": score, "Critic": score}
-```
-
-Why cooperative? The Critic's job is to help the Generator improve. If the Critic is adversarial, it might give unhelpful feedback.
-
-### Task Generation
-
-Tasks are generated dynamically to prevent overfitting:
-
-```python
-class TaskProposerEpisode(Episode):
-    async def rollout(self, arena, artifact, state):
-        prompt = "Generate an interesting creative writing task..."
-        response = await self.call_model("TaskProposer", prompt, arena)
-        task = parse_task(response.text)
-
-        arena.stores["tasks"].add(Artifact(data=task))
-        return state
-```
-
-The TaskProposer is non-trainable—it just populates the task store.
-
-### Running It
-
-```bash
-uv run examples/train_refine_loop.py
-```
-
----
-
 ## HeadToHead: Self-Play Tournaments
 
 **Pattern**: Same-model competition, LLM judging, zero-sum rewards
 
-Two players respond to the same creative challenge. An LLM judge picks the winner.
+Two "players" respond to the same creative challenge. An LLM judge picks the winner.
 
 ### Symmetric Setup
 
 ```python
-class HeadToHeadEpisode(Episode):
+class MatchEpisode(Episode):
     async def rollout(self, arena, artifact, state):
         challenge = artifact["challenge"]
 
-        # Both players respond
+        # Both players respond to same challenge
         p0_response = await self.call_model("Player0", challenge, arena)
         p1_response = await self.call_model("Player1", challenge, arena)
 
@@ -339,9 +244,9 @@ class HeadToHeadEpisode(Episode):
         return state
 ```
 
-Both players are the same model with the same prompt—pure self-play.
+Both players are the same model with the same prompt - pure self-play.
 
-### LLM Judge
+### LLM Judge Reward
 
 ```python
 async def judge_reward(rollout: Rollout, arena: Arena) -> Dict[str, float]:
@@ -356,7 +261,8 @@ async def judge_reward(rollout: Rollout, arena: Arena) -> Dict[str, float]:
     Which response is better? Reply with just "A" or "B" or "tie".
     """
 
-    response = await judge_client.complete(prompt, temperature=0.3)
+    # Judge calls arena.call_model without actor_id - not training data
+    response = await arena.call_model(prompt, temperature=0.3)
     winner = parse_winner(response.text)
 
     if winner == "A":
@@ -371,12 +277,12 @@ Zero-sum: one player's gain is the other's loss.
 
 ### Challenge Generation
 
-Similar to RefineLoop, challenges are generated dynamically:
+Challenges are generated dynamically to prevent overfitting:
 
 ```python
 class ChallengeProposerEpisode(Episode):
     async def rollout(self, arena, artifact, state):
-        prompt = "Generate a creative challenge that tests reasoning..."
+        prompt = "Generate an interesting creative challenge that tests reasoning..."
         response = await self.call_model("ChallengeProposer", prompt, arena)
         challenge = parse_challenge(response.text)
 
@@ -384,10 +290,56 @@ class ChallengeProposerEpisode(Episode):
         return state
 ```
 
+The ChallengeProposer is non-trainable - it just populates the challenge store.
+
 ### Running It
 
 ```bash
 uv run examples/train_head_to_head.py
+```
+
+---
+
+## RefineLoop: Cooperative Multi-Turn
+
+**Pattern**: Generator/Critic loop, cooperative rewards, external LLM judge
+
+A Generator writes drafts. A Critic provides feedback. The Generator revises. Repeat N times. Final quality judged by external LLM.
+
+### Turn Structure
+
+```
+Turn 0: Generator writes initial draft
+Turn 1: Critic provides feedback
+Turn 2: Generator revises based on feedback
+Turn 3: Critic provides more feedback
+...
+Turn N: Final draft evaluated by judge
+```
+
+### Cooperative Rewards
+
+Both Generator and Critic share the same reward:
+
+```python
+async def judge_reward(rollout: Rollout, arena: Arena) -> Dict[str, float]:
+    final_draft = rollout.extras["final_draft"]
+
+    # External judge evaluates final quality
+    prompt = f"Rate this writing 0-10: {final_draft}"
+    response = await judge_client.complete(prompt)
+    score = parse_score(response.text) / 10.0
+
+    # Both actors get same reward (cooperative)
+    return {"Generator": score, "Critic": score}
+```
+
+Why cooperative? The Critic's job is to help the Generator improve. If the Critic were adversarial, it might give unhelpful feedback just to make the Generator fail.
+
+### Running It
+
+```bash
+uv run examples/train_refine_loop.py
 ```
 
 ---
@@ -400,6 +352,8 @@ Like Proposer/Solver, but:
 1. Proposer reads from a corpus (external documents)
 2. Solver episodes ARE trainable (curriculum learning for both)
 3. Judge uses semantic similarity, not exact match
+
+Based on [SPICE](https://arxiv.org/abs/2510.24684).
 
 ### Corpus Integration
 
@@ -421,12 +375,12 @@ class SPICEProposerEpisode(Episode):
         question = parse_question(response.text)
         question["source_doc"] = doc.data
 
-        # Spawn solver episodes (these ARE trainable)
+        # Spawn solver episodes - these ARE trainable
         requests = [
             EpisodeRequest(
                 episode_type="solve",
                 artifact=question,
-                is_trainable=True  # Train on these too
+                is_trainable=True  # Train on these too!
             )
             for _ in range(self.n_solver_rollouts)
         ]
@@ -436,7 +390,7 @@ class SPICEProposerEpisode(Episode):
         return state
 ```
 
-Key difference: solver episodes are trainable. Both proposer and solver improve together.
+Key difference from ProposerSolver: `is_trainable=True` means the solver rollouts are trained on.
 
 ### Semantic Similarity Judge
 
@@ -460,16 +414,7 @@ async def semantic_judge(rollout: Rollout, arena: Arena) -> Dict[str, float]:
     return {"Solver": 1.0 if equivalent else 0.0}
 ```
 
-More flexible than exact match—captures paraphrases and equivalent formulations.
-
-### Corpus Store
-
-```python
-# Load corpus at initialization
-async def on_train_start(self):
-    for doc in load_documents("data/corpus/*.txt"):
-        self.stores["corpus"].add(Artifact(data={"content": doc}))
-```
+More flexible than exact match - captures paraphrases and equivalent formulations.
 
 ### Running It
 
@@ -479,13 +424,54 @@ uv run examples/train_spice.py
 
 ---
 
+## GSM8K: Dataset-Based Training
+
+**Pattern**: Single actor, dataset-based, GRPO credit assignment
+
+GSM8K shows that the self-play framework can also handle more standard dataset-based training loops. A model learns to solve math word problems using reward shaping - no self-play involved, just sampling from a dataset and training on correctness.
+
+### How It Works
+
+```python
+class GSM8KArena(Arena):
+    def get_batch(self) -> List[EpisodeRequest]:
+        # Sample one question, repeat N times (GRPO)
+        sample = self.stores["gsm8k"].sample_one()
+        return [
+            EpisodeRequest("gsm8k", sample.data)
+            for _ in range(self.episodes_per_step)
+        ]
+```
+
+Each batch contains multiple rollouts of the same question. GRPO computes advantages relative to the group - if one rollout gets the right answer and another doesn't, the correct one gets positive advantage.
+
+### Reward Function
+
+```python
+def gsm8k_reward(rollout: Rollout, arena: Arena) -> Dict[str, float]:
+    text = rollout.steps[0].completion_text
+    parsed = extract_answer(text)
+    correct = normalize(parsed) == normalize(rollout.artifact["answer"])
+    return {"model": 1.0 if correct else 0.0}
+```
+
+Simple exact-match against ground truth. The model learns to use the correct format and get the right answer.
+
+### Running It
+
+```bash
+uv run examples/train_gsm8k.py
+```
+
+---
+
 ## Creating Your Own
 
 To create a new self-play setup:
 
-1. **Define your actors**: What actors exist? What are their system prompts?
+1. **Define your actors**: What personalities exist? What are their system prompts?
 
-2. **Design your episode**: What's the interaction protocol? Is it single-turn, multi-turn, or hierarchical?
+2. **Design your episode**: What's the interaction protocol? Single-turn, multi-turn, or hierarchical?
 
 3. **Write your rubric**: How do you score outcomes? Do you need an LLM judge?
 
@@ -493,7 +479,7 @@ To create a new self-play setup:
 
 5. **Set up your arena**: Where does data come from? How are batches scheduled?
 
-Example skeleton:
+### Skeleton
 
 ```python
 class MyEpisode(Episode):
@@ -506,10 +492,12 @@ class MyEpisode(Episode):
         return Rubric([my_reward_fn])
 
     async def rollout(self, arena, artifact, state):
-        # Your logic here
         response = await self.call_model("Actor", prompt, arena)
-        # ...
+        # Your logic here
         return state
+
+    def get_extras(self, state) -> Dict[str, Any]:
+        return {"result": state.data["result"]}
 
 class MyArena(Arena):
     def get_batch(self) -> List[EpisodeRequest]:
