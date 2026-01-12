@@ -108,14 +108,6 @@ class MyArena(Arena):
         return [EpisodeRequest("solve", s.data) for s in samples]
 ```
 
-### Credit Assignment
-
-How do we turn rewards into advantages? Built-in options:
-
-- **GRPOCredit**: Group-relative advantages, hierarchy-aware
-- **RAECredit**: Actor-conditioned EMA baselines (from SPIRAL) - useful when actors have structural advantages like first-mover
-- **ConstantCredit**: All steps get weight 1.0
-
 [See docs/concepts.md for the deep dive](docs/concepts.md)
 
 
